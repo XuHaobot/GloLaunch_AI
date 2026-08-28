@@ -1,0 +1,19 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+chromadb>=0.5.0
+sqlalchemy>=2.0.0
+sse-starlette>=2.0.0
+httpx>=0.27.0
+Pillow>=10.0.0
+imageio-ffmpeg>=0.5.0
+python-multipart>=0.0.9
+# 阿里云电商图片翻译（识图翻译）：详情页中文图自动改文字为目标语言（可选，未安装时节点自动降级）
+alibabacloud_alimt20190102>=1.0.0
+alibabacloud_tea_openapi>=0.3.0
+alibabacloud_tea_util>=0.3.0

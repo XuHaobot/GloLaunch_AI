@@ -1,0 +1,55 @@
+/* ============ 主题变量：默认亮色，html.dark 时切换暗色 ============ */
+:root {
+  /* 结构色（主题切换核心） */
+  --gl-bg: #f3f5f9;              /* 页面底色 */
+  --gl-panel: #ffffff;           /* 卡片/面板 */
+  --gl-panel-deep: #f6f8fb;      /* 面板内深层背景 */
+  --gl-side: #fbfcfe;            /* 侧边栏背景 */
+  --gl-node: #eef1f6;            /* 节点/条目背景 */
+  --gl-border: #e5e8ef;          /* 常规边框 */
+  --gl-border-2: #d3dae4;        /* 次级边框/分隔 */
+  --gl-border-3: #b6c0cd;        /* 三级边框 */
+  --gl-hover-border: #b9c6e2;    /* 悬停边框 */
+  --gl-text-hi: #101828;         /* 高亮文字 */
+  --gl-text: #26334d;            /* 正文 */
+  --gl-text-hi2: #1d2939;        /* 次高亮文字 */
+  --gl-text-mid: #475467;        /* 中层文字 */
+  --gl-sub: #667085;             /* 说明文字 */
+  --gl-faint: #98a2b3;           /* 弱化文字 */
+  --gl-hover: #f2f5fa;           /* 悬停背景 */
+  --gl-active: #e9effc;          /* 激活背景 */
+  --gl-shadow: rgba(15, 23, 42, 0.08);
+  /* 品牌/状态色（两种主题共用） */
+  --gl-accent: #38bdf8;
+  --gl-green: #22c55e;
+  --gl-amber: #f59e0b;
+  --gl-red: #ef4444;
+  --gl-blue: #2563eb;
+}
+
+html.dark {
+  --gl-bg: #0b0f19;
+  --gl-panel: #111827;
+  --gl-panel-deep: #0f172a;
+  --gl-side: #0d1322;
+  --gl-node: #1e293b;
+  --gl-border: #1f2937;
+  --gl-border-2: #334155;
+  --gl-border-3: #475569;
+  --gl-hover-border: #3b4d7a;
+  --gl-text-hi: #f8fafc;
+  --gl-text: #e2e8f0;
+  --gl-text-hi2: #f1f5f9;
+  --gl-text-mid: #cbd5e1;
+  --gl-sub: #94a3b8;
+  --gl-faint: #64748b;
+  --gl-hover: #16203a;
+  --gl-active: #1d2b4d;
+  --gl-shadow: rgba(0, 0, 0, 0.3);
+}
+
+/* 细滚动条（面板内部滚动区） */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--gl-border-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--gl-border-3); }

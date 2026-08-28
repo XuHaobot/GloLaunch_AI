@@ -1,0 +1,30 @@
+# 工作区内部记忆（不入库）
+.workbuddy/
+
+# 敏感凭证（API Key / OAuth Token 等，严禁入库）
+.env
+backend/.env
+backend/data/ali1688_token.json
+
+# 本地数据（向量库 / SQLite / 上传文件 / 检查点）
+backend/data/
+backend/uploads/
+
+# 依赖与构建产物
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# 验证截图（仅本地查看，不入库）
+/*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
