@@ -6,6 +6,12 @@
 backend/.env
 backend/data/ali1688_token.json
 
+# 本地运行脚本与比赛过程文档（不公开到 GitHub）
+*.bat
+GloLaunch_AI_*.md
+QUICKSTART.md
+提交准备指南.md
+
 # 本地数据（向量库 / SQLite / 上传文件 / 检查点）
 backend/data/
 backend/uploads/
