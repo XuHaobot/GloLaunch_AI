@@ -9,6 +9,7 @@ backend/data/ali1688_token.json
 # 本地数据（向量库 / SQLite / 上传文件 / 检查点）
 backend/data/
 backend/uploads/
+backend/packages/
 
 # 依赖与构建产物
 node_modules/

@@ -128,3 +128,55 @@ async def _run_in_thread(func, *args):
         return await asyncio.to_thread(func, *args)
     except Exception:
         return None
+
+
+async def run_video_storyboard(
+    title: str,
+    bullet_points: list,
+    category: str,
+    platform: str = "TikTok",
+    market: str = "US",
+) -> Dict[str, Any]:
+    """独立调用：生成带货视频分镜脚本（不含 TTS / ffmpeg 合成）。
+
+    供前端「按需生成」按钮调用，不依赖主流水线状态。
+    """
+    llm = get_fast_llm(temperature=0.5)
+    bp_text = "\n".join(f"- {bp}" for bp in bullet_points[:5]) if bullet_points else "无"
+
+    try:
+        messages = [
+            SystemMessage(content=PROMPT_VIDEO_STORYBOARD),
+            HumanMessage(content=(
+                f"商品：{title}\n"
+                f"品类：{category}\n"
+                f"目标平台：{platform} ({market} 站点)\n"
+                f"卖点：\n{bp_text}"
+            )),
+        ]
+        response = await llm.ainvoke(messages)
+        content = response.content.strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+        storyboard = json.loads(content)
+    except Exception:
+        storyboard = dict(FALLBACK_STORYBOARD)
+
+    shots = storyboard.get("shots", [])
+    duration = sum(s.get("duration", 3) for s in shots)
+
+    return {
+        "mode": "storyboard_only",
+        "platform": platform,
+        "title_hook": storyboard.get("title_hook", ""),
+        "bgm_style": storyboard.get("bgm_style", ""),
+        "storyboard": shots,
+        "narration_script": " ".join(s.get("voiceover", "") for s in shots),
+        "audio_url": None,
+        "video_url": None,
+        "duration_seconds": duration,
+        "engine": "storyboard_engine",
+        "fallback_note": storyboard.get("_note") if storyboard.get("_fallback") else None,
+    }

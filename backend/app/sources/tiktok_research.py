@@ -200,11 +200,29 @@ class TikTokResearchSource(ResearchSource):
             for kw in keywords[:3]:
                 result = await self.search_products(keyword=kw, region=market)
                 if result:
-                    items = result.get("data", {}).get("products", []) or result.get("data", {}).get("items", [])
+                    # TikTok 响应为双层嵌套: body.data.data.products
+                    search_data = result.get("data", {})
+                    inner = search_data
+                    if isinstance(inner, dict) and "data" in inner:
+                        inner = inner["data"]
+                    items = inner.get("products", []) or inner.get("items", [])
                     for item in items[:5]:
-                        pid = item.get("product_id", "") or item.get("id", "")
-                        title = item.get("title", "") or item.get("name", "")
-                        price = _parse_price(item.get("price") or item.get("min_price"))
+                        pid = str(item.get("product_id", "") or item.get("id", ""))
+                        title = (item.get("title", "") or item.get("name", ""))[:80]
+                        # 价格: product_price_info.sale_price_decimal -> price -> min_price
+                        price_info = item.get("product_price_info") or {}
+                        price = _parse_price(
+                            price_info.get("sale_price_decimal")
+                            if price_info else None
+                        )
+                        if price is None:
+                            price = _parse_price(item.get("price") or item.get("min_price"))
+                        # 评分: rate_info.score -> rating
+                        rate_info = item.get("rate_info") or {}
+                        if rate_info and rate_info.get("score") is not None:
+                            rating = _parse_price(rate_info["score"])
+                        else:
+                            rating = _parse_price(item.get("rating"))
                         img = (item.get("images", []) or [""])[0] if item.get("images") else item.get("image", "")
 
                         competitors.append(CompetitorSnapshot(

@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -13,7 +14,7 @@ class Settings(BaseSettings):
     model_text_flash: str = "qwen3.6-flash"    # 快速校验与适配（快速）
     model_vl: str = "qwen3.7-plus"             # 多模态视觉属性提取与图片文字识别/翻译兜底（套餐无独立 VL 模型）
     model_image: str = "wan2.7-image-pro"      # AI 场景图/白底主图生成（同步调用）
-    model_image_edit: str = "wan2.5-i2i-preview"  # 图片编辑（异步任务）用于真实试穿合成；套餐未包含时自动降级预设兜底
+    model_image_edit: str = "wan2.7-image-pro"  # 图片编辑（异步任务）用于真实试穿合成与图片本地化；套餐未包含时自动降级预设兜底
     model_tts: str = "qwen-audio-3.0-tts-plus"    # 商品展示视频自动配音（TTS 语音合成）
     tts_voice: str = "longanhuan_v3.6"            # TTS 音色（Qwen-Audio-TTS 系列音色，支持中英文）
 
@@ -62,6 +63,16 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @model_validator(mode="after")
+    def _resolve_relative_paths(self):
+        """将相对路径解析为基于 backend/ 目录的绝对路径，避免受进程 CWD 影响"""
+        backend_dir = os.path.dirname(os.path.dirname(__file__))
+        for field in ("data_dir", "chroma_dir", "upload_dir", "sqlite_path", "checkpoint_path"):
+            val = getattr(self, field, "")
+            if val and not os.path.isabs(val):
+                setattr(self, field, os.path.join(backend_dir, val))
+        return self
 
 @lru_cache()
 def get_settings() -> Settings:

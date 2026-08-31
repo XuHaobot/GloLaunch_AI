@@ -12,7 +12,7 @@ PROMPT_PLATFORM_VALIDATOR = """你是一名严格的跨境平台（Amazon/Shopee
 
 检查规则项：
 1. 标题长度：不超过 200 字符，且无重复堆砌违禁词（如 100% Free Shipping, Best Seller, #1）。
-2. 属性完整度：品类、材质、颜色等核心字段是否齐全。
+2. 属性完整度：检查 product_attributes 中的品类 (category)、材质 (materials)、颜色 (main_color) 等核心字段是否齐全。注意：属性在独立的 attributes 对象中，不在 title 里。
 3. 风险预警：是否包含侵权品牌或违禁敏感词。
 
 请严格输出合法的 JSON 对象，不要包含任何 markdown 代码块标记，不要包含多余文字。
@@ -51,6 +51,14 @@ async def platform_node(state: AgentState) -> Dict[str, Any]:
     llm = get_fast_llm(temperature=0.1)
 
     try:
+        # 构建属性摘要供 LLM 质检
+        attrs_summary = (
+            f"材质 (materials): {attrs.get('materials', [])}\n"
+            f"颜色 (main_color): {attrs.get('main_color', '')}\n"
+            f"品类 (category): {attrs.get('category', '')}\n"
+            f"规格 (key_specs): {attrs.get('key_specs', [])}\n"
+            f"风格 (style_tags): {attrs.get('style_tags', [])}"
+        )
         messages = [
             SystemMessage(content=PROMPT_PLATFORM_VALIDATOR),
             HumanMessage(content=(
@@ -58,7 +66,10 @@ async def platform_node(state: AgentState) -> Dict[str, Any]:
                 f"商品品类：{category}\n"
                 f"Title（{title_len}字符）：{title}\n"
                 f"Bullet Points 数量：{len(bullets)} 条\n"
-                f"Search Terms 长度：{len(listing.get('search_terms', ''))} 字符"
+                f"Search Terms 长度：{len(listing.get('search_terms', ''))} 字符\n"
+                f"\n--- product_attributes 属性表 ---\n"
+                f"{attrs_summary}\n"
+                f"--- 属性表结束 ---"
             ))
         ]
         response = await llm.ainvoke(messages)
@@ -73,9 +84,11 @@ async def platform_node(state: AgentState) -> Dict[str, Any]:
         compliance_status = llm_result.get("compliance_status", "PASS")
         rule_check_results = llm_result.get("rule_check_results", [])
     except Exception:
-        compliance_status = "UNKNOWN"
+        compliance_status = "WARNING"
         rule_check_results = [
-            {"rule_name": "Title Length Check", "status": "SKIPPED", "details": "LLM 质检未成功，需人工复核"},
+            {"rule_name": "Title Length Check", "status": "WARNING", "details": "LLM 质检未成功，需人工复核"},
+            {"rule_name": "Attribute Completeness Check", "status": "WARNING", "details": "LLM 质检未成功，需人工复核"},
+            {"rule_name": "Prohibited Words Check", "status": "WARNING", "details": "LLM 质检未成功，需人工复核"},
         ]
 
     # ── 基于真实数据生成确定性 SKU，绝不依赖 LLM ──

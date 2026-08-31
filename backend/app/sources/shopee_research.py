@@ -232,11 +232,16 @@ class ShopeeResearchSource(ResearchSource):
             for kw in keywords[:3]:
                 result = await self.search_products(keyword=kw, site=site)
                 if result:
-                    items = result.get("data", {}).get("items", []) or result.get("data", {}).get("products", [])
-                    for item in items[:5]:
-                        item_id = str(item.get("itemid", "") or item.get("item_id", "") or item.get("id", ""))
-                        title = item.get("name", "") or item.get("title", "")
-                        price = _parse_price(item.get("price") or item.get("price_min"))
+                    # Shopee 响应: data.cards 列表（非 items/products）
+                    data = result.get("data", {})
+                    cards = data.get("cards", []) or data.get("items", []) or data.get("products", [])
+                    for item in cards[:5]:
+                        item_id = str(item.get("item_id", "") or item.get("itemid", "") or item.get("id", ""))
+                        title = (item.get("title", "") or item.get("name", ""))[:80]
+                        # 价格: display_price (数值) -> price -> price_min
+                        price = _parse_price(item.get("display_price"))
+                        if price is None:
+                            price = _parse_price(item.get("price") or item.get("price_min"))
                         # Shopee 价格通常需要除以 100000（IDR）或 100（TWD/THB），
                         # 但 JustOneAPI 可能已做转换，这里保持原值
                         img = (item.get("images", []) or [""])[0] if item.get("images") else item.get("image", "")

@@ -1,14 +1,18 @@
 import base64
 import json
+import logging
 import mimetypes
 import os
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.services.llm import get_llm
+
+logger = logging.getLogger(__name__)
 
 PROMPT_PRODUCT_VISION = """你是一个专业的跨境电商商品分析师和多模态属性识别专家，精通全品类商品（服装、3C 电子、家居、美妆、玩具、户外运动等）的结构化拆解。
 请仔细观察用户上传的商品图片，先判断商品所属品类大类，再提取该品类的关键结构化属性，以便用于后续的选品分析和海外 Listing 文案撰写。
@@ -30,14 +34,27 @@ JSON 字段规范：
 """
 
 def _local_image_to_data_uri(image_url: str) -> Optional[str]:
-    """将本地上传的 /uploads/ 图片转为 base64 data URI（外部模型服务无法访问本机链接）"""
-    if not image_url.startswith("/uploads/"):
+    """将本地图片文件（/uploads/ 或本地绝对路径）转为 base64 data URI，供云端大模型与生图 API 读取"""
+    if not image_url:
         return None
-    settings = get_settings()
-    filename = os.path.basename(image_url)
-    file_path = os.path.join(settings.upload_dir, filename)
-    if not os.path.isfile(file_path):
+    if image_url.startswith("data:"):
+        return image_url
+    if image_url.startswith(("http://", "https://")):
+        return None  # 已经是公网 URL
+
+    file_path = None
+    if os.path.isfile(image_url):
+        file_path = image_url
+    elif image_url.startswith("/uploads/"):
+        settings = get_settings()
+        filename = os.path.basename(image_url)
+        cand = os.path.join(settings.upload_dir, filename)
+        if os.path.isfile(cand):
+            file_path = cand
+
+    if not file_path or not os.path.isfile(file_path):
         return None
+
     mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
     with open(file_path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
@@ -110,6 +127,30 @@ async def product_node(state: AgentState) -> Dict[str, Any]:
     for list_field in ("materials", "style_tags", "design_features", "key_specs", "target_occasions"):
         if not isinstance(attributes.get(list_field), list):
             attributes[list_field] = []
+
+    # ── 核心属性完整性强制校验：材质/颜色/规格(尺码) 必须填充 ──
+    # 合规质检要求这些字段不能为空，否则 Listing 无法通过上架审核
+    _missing_core = []
+    if not attributes.get("materials") or (isinstance(attributes["materials"], list) and not any(m.strip() for m in attributes["materials"] if isinstance(m, str))):
+        _missing_core.append("materials")
+    if not attributes.get("main_color") or (isinstance(attributes["main_color"], str) and not attributes["main_color"].strip()):
+        _missing_core.append("main_color")
+    if not attributes.get("key_specs") or (isinstance(attributes["key_specs"], list) and not any(s.strip() for s in attributes["key_specs"] if isinstance(s, str))):
+        _missing_core.append("key_specs")
+
+    if _missing_core:
+        # 尝试用 LLM 从标题/已有属性推断缺失字段
+        inferred = await _infer_missing_attributes(
+            title=title_1688,
+            category=attributes.get("category", ""),
+            category_family=attributes.get("category_family", "general"),
+            existing_attributes=attributes,
+            missing_fields=_missing_core,
+        )
+        for field, value in inferred.items():
+            if value:
+                attributes[field] = value
+                logger.info("属性补全：%s = %s", field, value)
 
     attr_count = sum(1 for v in attributes.values() if v)
 
@@ -186,3 +227,66 @@ async def _infer_from_title(title: str) -> Dict[str, Any]:
             "season": "四季通用",
             "target_occasions": []
         }
+
+
+async def _infer_missing_attributes(
+    title: str,
+    category: str,
+    category_family: str,
+    existing_attributes: Dict[str, Any],
+    missing_fields: List[str],
+) -> Dict[str, Any]:
+    """用 LLM 从标题和品类推断缺失的核心属性（材质/颜色/规格），确保合规质检通过。"""
+    llm = get_llm(temperature=0.2)
+    fields_desc = {
+        "materials": "材质/面料（如：Cotton, Polyester, ABS Plastic, Stainless Steel 等）",
+        "main_color": "主色调（如：Black, Navy Blue, White 等）",
+        "key_specs": "规格参数（服装类填尺码范围如 S-XXL，其他品类填尺寸/容量/功率等）",
+    }
+    try:
+        missing_desc = "\n".join(f"- {f}: {fields_desc.get(f, '未知字段')}" for f in missing_fields)
+        existing_summary = {k: v for k, v in existing_attributes.items()
+                           if k in ("category", "category_family", "title", "style_tags", "design_features")}
+        prompt = (
+            f"你是一名跨境电商商品属性专家。以下商品缺少核心属性信息，请根据标题、品类和已有信息推断缺失字段。\n\n"
+            f"商品已有信息：{json.dumps(existing_summary, ensure_ascii=False)}\n"
+            f"缺失字段：\n{missing_desc}\n\n"
+            f"推断规则：\n"
+            f"1. 根据品类给出最合理的默认值（服装类材质通常为 Cotton/Polyester，颜色从标题提取）\n"
+            f"2. 服装类 key_specs 必须包含尺码范围（如 S/M/L/XL/XXL）\n"
+            f"3. 材质用英文输出，颜色用英文输出，规格用英文输出\n"
+            f"4. 只输出缺失字段，不要输出其他内容\n\n"
+            f"请输出 JSON 对象，仅包含缺失的字段名和推断值。"
+        )
+        messages = [
+            SystemMessage(content="输出纯 JSON，不含 markdown 代码块。"),
+            HumanMessage(content=prompt),
+        ]
+        response = await llm.ainvoke(messages)
+        content = response.content.strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+        result = json.loads(content)
+        # 确保返回的字段确实在 missing_fields 中
+        return {k: v for k, v in result.items() if k in missing_fields and v}
+    except Exception as e:
+        logger.warning("LLM 推断缺失属性失败: %s，使用硬编码兜底", e)
+        # 硬编码兜底：根据品类给出最保守的默认值
+        fallback = {}
+        if "materials" in missing_fields:
+            if category_family == "apparel":
+                fallback["materials"] = ["Cotton", "Polyester"]
+            elif category_family == "electronics":
+                fallback["materials"] = ["ABS Plastic", "Metal"]
+            else:
+                fallback["materials"] = ["Standard Material"]
+        if "main_color" in missing_fields:
+            fallback["main_color"] = "Black"
+        if "key_specs" in missing_fields:
+            if category_family == "apparel":
+                fallback["key_specs"] = ["S", "M", "L", "XL", "XXL"]
+            else:
+                fallback["key_specs"] = ["Standard Size"]
+        return fallback

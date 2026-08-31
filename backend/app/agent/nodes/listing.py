@@ -9,11 +9,17 @@ from app.services.llm import get_llm
 PROMPT_LISTING_WRITER = """你是一名精通 Amazon/TikTok/Shopee 等各大跨境电商平台的 Senior Copywriter & SEO Specialist。
 你需要依据商品结构化属性、出海市场洞察报告与爆款对标策略，为目标平台撰写高转化、高权重的原生英语多语言 Listing。
 
-❗核心原则：严禁对中文卖点做字面直译！必须严格遵循爆款对标策略给出的标题公式与埋词策略，
+核心原则：严禁对中文卖点做字面直译！必须严格遵循爆款对标策略给出的标题公式与埋词策略，
 模仿目标平台同类爆款的表达习惯，将卖点重组为目标市场买家搜索语境下的原生文案。
 
+⚠️ 标题撰写铁律（违反将导致 Listing 被拒）：
+1. 同一单词在标题中最多出现 2 次（如 "Jacket" 不可超过 2 次），严禁关键词堆砌。
+2. 标题必须读起来像一句自然的人类语言，而非关键词列表。
+3. 禁止使用可能侵权的品牌名（如 Nike、Adidas、Gucci、North Face 等），除非该品牌名来自商品属性中的品牌字段。
+4. 禁止使用绝对化用语（Best Seller、#1、100% Free、Guaranteed 等）。
+
 严格遵循 Amazon A9/COSMO 算法规范：
-1. Title: 150-195字符之间，前置核心大词，埋入品牌词、面料、核心版型、适用场景。
+1. Title: 150-195字符之间，前置核心大词，自然融入面料、核心版型、适用场景。
 2. Bullet Points (五点描述): 5条，每条以大写的卖点标签开头，如 [PREMIUM BREATHABLE FABRIC]、[ELEGANT FRENCH COTTAGECORE DESIGN]，正文阐明利益点与痛点解决方案。
 3. Description: 富文本长描述，包含故事化场景代入、护理洗涤说明与尺码指引。
 4. Search Terms (Backend Keywords): 精选 200 字节以内高相关长尾词，空格分隔，不带标点，不重复标题词汇。
@@ -21,7 +27,7 @@ PROMPT_LISTING_WRITER = """你是一名精通 Amazon/TikTok/Shopee 等各大跨�
 请严格输出合法的 JSON 对象，不要包含任何 markdown 代码块标记，不要包含多余文字。
 JSON 字段规范：
 {
-  "title": "Amazon 英文主标题",
+  "title": "Amazon 英文主标题（自然可读，无关键词堆砌，无侵权品牌名）",
   "bullet_points": [
     "[CAPITALIZED FEATURE TAG] 详细卖点描述内容...",
     "[CAPITALIZED FEATURE TAG] 详细卖点描述内容...",
@@ -97,6 +103,53 @@ async def listing_node(state: AgentState) -> Dict[str, Any]:
                 raise ValueError("LLM 返回的 Listing 缺少 title 字段")
             if not listing_data.get("bullet_points"):
                 raise ValueError("LLM 返回的 Listing 缺少 bullet_points 字段")
+
+            # 标题质量校验：关键词堆砌检测
+            title = listing_data["title"]
+            words = title.lower().split()
+            word_counts = {}
+            for w in words:
+                # 过滤掉短词（介词、冠词等）
+                if len(w) > 2:
+                    word_counts[w] = word_counts.get(w, 0) + 1
+            repeated_words = [w for w, c in word_counts.items() if c > 2]
+            if repeated_words:
+                raise ValueError(
+                    f"标题关键词堆砌：'{', '.join(repeated_words)}' 出现超过2次，请重写标题使其更自然"
+                )
+
+            # 标题长度校验
+            if len(title) < 80 or len(title) > 200:
+                raise ValueError(
+                    f"标题长度 {len(title)} 字符不符合要求（80-200字符），请调整"
+                )
+
+            # 禁止词检测
+            prohibited = ["best seller", "#1", "100% free", "guaranteed", "cheap", "free shipping"]
+            title_lower = title.lower()
+            found_prohibited = [p for p in prohibited if p in title_lower]
+            if found_prohibited:
+                raise ValueError(
+                    f"标题包含禁止用语：'{', '.join(found_prohibited)}'，请移除"
+                )
+
+            # 品牌侵权风险检测：标题中不得包含受保护品牌名
+            protected_brands = [
+                "nike", "adidas", "gucci", "north face", "puma", "reebok",
+                "under armour", "new balance", "asics", "converse", "vans",
+                "lululemon", "patagonia", "columbia", "arcteryx", "salomon",
+                "louis vuitton", "chanel", "hermes", "prada", "dior", "versace",
+                "balenciaga", "fendi", "givenchy", "burberry", "ralph lauren",
+                "calvin klein", "tommy hilfiger", "lacoste",
+                "apple", "samsung", "sony", "bose", "jbl", "beats",
+                "dyson", "gopro", "canon", "nikon",
+                "disney", "marvel", "lego", "barbie", "pokemon",
+            ]
+            found_brands = [b for b in protected_brands if b in title_lower]
+            if found_brands:
+                raise ValueError(
+                    f"标题包含受保护品牌名：'{', '.join(found_brands)}'，存在商标侵权风险，请移除"
+                )
 
             break  # 成功，跳出重试循环
         except Exception as e:

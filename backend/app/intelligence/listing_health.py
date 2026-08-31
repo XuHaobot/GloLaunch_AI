@@ -358,18 +358,62 @@ class ListingHealthCalculator:
         )
 
     def _evaluate_compliance(self, listing: Dict[str, Any], platform: str) -> HealthDimension:
-        """合规检查评估"""
-        # 基础合规检查
+        """合规检查评估：包含违禁词检测和品牌侵权风险检测"""
         title = listing.get("title", "")
+        search_terms = listing.get("search_terms", "")
+        bullet_points = listing.get("bullet_points", [])
+        all_text = (title + " " + " ".join(bullet_points) + " " + search_terms).lower()
         suggestions = []
-        score = 80
+        score = 85
 
-        # 检查常见违禁词
-        prohibited = ["best seller", "#1", "100% free", "guaranteed", "cheap"]
-        found = [w for w in prohibited if w in title.lower()]
+        # 检查常见违禁词（绝对化用语）
+        prohibited = [
+            "best seller", "#1", "100% free", "guaranteed", "cheap",
+            "free shipping", "top rated", "#1 selling", "best quality",
+            "lowest price", "no. 1", "number one",
+        ]
+        found = [w for w in prohibited if w in all_text]
         if found:
             score -= 20
-            suggestions.append(f"标题含违禁词: {', '.join(found)}")
+            suggestions.append(f"标题/描述含违禁词: {', '.join(found)}")
+
+        # 品牌侵权风险检测：常见受保护品牌名（按品类分组）
+        protected_brands = {
+            # 运动/服装
+            "nike", "adidas", "gucci", "north face", "puma", "reebok",
+            "under armour", "new balance", "asics", "converse", "vans",
+            "lululemon", "patagonia", "columbia", "arcteryx", "salomon",
+            # 奢侈品/时尚
+            "louis vuitton", "chanel", "hermes", "prada", "dior", "versace",
+            "balenciaga", "fendi", "givenchy", "burberry", "ralph lauren",
+            "calvin klein", "tommy hilfiger", "lacoste",
+            # 电子/科技
+            "apple", "samsung", "sony", "bose", "jbl", "beats",
+            "dyson", "go pro", "canon", "nikon", "lg",
+            # 户外/箱包
+            "osprey", "patagonia", "yeti", "stanley", "hydro flask",
+            "samsonite", "tumi", "rimowa",
+            # 其他常见
+            "disney", "marvel", "lego", "barbie", "pokemon",
+        }
+        # 检测标题中是否包含品牌名
+        found_brands = []
+        for brand in protected_brands:
+            if brand in all_text:
+                found_brands.append(brand)
+        if found_brands:
+            score -= 30
+            suggestions.append(
+                f"⚠️ 品牌侵权高风险：标题/描述中包含受保护品牌名 '{', '.join(found_brands)}'，"
+                f"若非该品牌授权商品，请立即移除以避免商标侵权"
+            )
+
+        # Search Terms 长度检查（Amazon 限制 250 bytes）
+        if search_terms and len(search_terms.encode("utf-8")) > 250:
+            score -= 10
+            suggestions.append(
+                f"Search Terms 长度 {len(search_terms.encode('utf-8'))} bytes 超出 Amazon 250 bytes 限制"
+            )
 
         return HealthDimension(
             name="合规检查",

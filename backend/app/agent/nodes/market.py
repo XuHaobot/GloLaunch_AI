@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from typing import Dict, Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -6,6 +7,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agent.state import AgentState
 from app.services.llm import get_flagship_llm
 from app.services.vector_store import search_knowledge_base
+
+logger = logging.getLogger(__name__)
 
 PROMPT_MARKET_INSIGHT = """你是一名资深跨境电商选品操盘手与出海市场数据分析专家。
 你需要结合商品属性信息、目标市场与本地电商知识库，对该商品进行深度出海市场洞察与选品评估。
@@ -140,57 +143,181 @@ Output ONLY a JSON array of strings."""
             # Ensure all items are strings and limit to 5
             queries = [str(q).strip() for q in queries[:5] if str(q).strip()]
             if queries:
+                logger.info("LLM 生成搜索词: %s", queries)
                 return queries
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("搜索词 LLM 生成失败: %s，将使用降级搜索词", e)
 
     # Fallback: use category or title as-is (single query)
     fallback = title or category
+    logger.info("使用降级搜索词: %s", fallback)
     return [fallback] if fallback else []
 
 
-async def _fetch_amazon_real_data(title: str, category: str, market: str, search_query: Optional[str] = None) -> Optional[Dict]:
-    """调用 AmazonResearchSource 获取真实市场数据"""
+async def _fetch_amazon_real_data(
+    title: str,
+    category: str,
+    market: str,
+    search_query: Optional[str] = None,
+    search_queries: Optional[list] = None,
+) -> Optional[Dict]:
+    """调用 AmazonResearchSource 获取真实市场数据（增强版）
+
+    改进点：
+    - 尝试多个搜索关键词，直到拿到结果
+    - 搜索结果中提取 Top ASIN，批量拉取评论
+    - BSR 失败时降级到通用分类 'aps'
+    """
     try:
         from app.sources.amazon_research import AmazonResearchSource
         source = AmazonResearchSource()
         if not await source.is_available():
+            logger.warning("JustOneAPI 不可用（未配置 API Key）")
             return None
 
-        # Use the localized English search query if provided, otherwise fall back
-        # to title/category (which may be Chinese and yield no Amazon results)
-        search_query = search_query or title or category
-        if not search_query:
+        # ── 1. 构建搜索词列表 ──
+        queries = []
+        if search_queries:
+            queries.extend(search_queries[:3])  # 最多 3 个词，节省配额
+        if search_query and search_query not in queries:
+            queries.insert(0, search_query)
+        if not queries:
+            fallback = title or category
+            if fallback:
+                queries.append(fallback)
+        if not queries:
+            logger.warning("无可用搜索词，无法获取市场数据")
             return None
 
-        # 调用搜索和畅销榜
-        search_results = await source.search_products(search_query, country=market)
-        best_sellers = await source.get_best_sellers(category, country=market)
+        logger.info("Amazon 市场数据获取：搜索词 %s, 目标市场 %s", queries, market)
+
+        # ── 2. 依次尝试搜索词，合并结果 ──
+        search_results = None
+        all_products = []
+        for q in queries:
+            result = await source.search_products(q, country=market)
+            if result:
+                data = result.get("data", {})
+                items = data.get("products", []) or data.get("items", [])
+                if items:
+                    all_products.extend(items)
+                    if search_results is None:
+                        search_results = result
+                    logger.info("搜索词 '%s' 返回 %d 条结果", q, len(items))
+                else:
+                    logger.warning("搜索词 '%s' 返回空结果", q)
+            else:
+                logger.warning("搜索词 '%s' 请求失败（JustOneAPI 返回 None）", q)
+        # 去重（按 ASIN）
+        if all_products:
+            seen = set()
+            unique = []
+            for p in all_products:
+                asin = p.get("asin", "")
+                if asin and asin not in seen:
+                    seen.add(asin)
+                    unique.append(p)
+                elif not asin:
+                    unique.append(p)
+            # 将去重后的结果写回 search_results
+            if search_results:
+                if "data" not in search_results:
+                    search_results["data"] = {}
+                search_results["data"]["products"] = unique
+            else:
+                search_results = {"data": {"products": unique}}
+
+        # ── 3. 热销榜（BSR）—— 失败时降级到 'aps' ──
+        best_sellers = None
+        bs_category = category or "aps"
+        best_sellers = await source.get_best_sellers(category=bs_category, country=market)
+        if not best_sellers and bs_category != "aps":
+            best_sellers = await source.get_best_sellers(category="aps", country=market)
+
+        # ── 4. 拉取 Top 竞品的评论 ──
+        reviews_data = []
+        top_asins = []
+        if search_results:
+            data = search_results.get("data", {})
+            products = data.get("products", []) or data.get("items", [])
+            for p in products[:5]:
+                asin = p.get("asin", "")
+                if asin:
+                    top_asins.append(asin)
+
+        for asin in top_asins[:3]:  # 最多拉 3 个 ASIN 的评论
+            try:
+                review = await source.get_product_top_reviews(asin=asin, country=market)
+                if review:
+                    reviews_data.append({"asin": asin, "data": review.get("data", {})})
+            except Exception:
+                pass
 
         if not search_results and not best_sellers:
+            logger.warning("Amazon 市场数据获取失败：搜索和 BSR 均无结果")
             return None
 
+        logger.info(
+            "Amazon 市场数据获取成功：竞品 %d 个, BSR %s, 评论 %d 条",
+            len((search_results or {}).get("data", {}).get("products", [])),
+            "有" if best_sellers else "无",
+            len(reviews_data),
+        )
         return {
             "sources": ["JustOneAPI:Amazon"],
             "freshness": time.strftime("%Y-%m"),
             "search_results": search_results,
             "best_sellers": best_sellers,
+            "reviews": reviews_data,  # 新增：评论数据
         }
-    except Exception:
+    except Exception as e:
+        logger.exception("_fetch_amazon_real_data 异常: %s", e)
         return None
 
 
+def _safe_parse_price(val) -> Optional[float]:
+    """安全解析价格字段，支持 int/float/字符串"""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val) if val > 0 else None
+    if isinstance(val, str):
+        import re
+        m = re.search(r"[\d]+\.?\d*", val.replace(",", ""))
+        v = float(m.group()) if m else None
+        return v if v and v > 0 else None
+    return None
+
+
 def _extract_competitors_from_search(search_data: Dict) -> list:
-    """从 JustOneAPI Amazon 搜索结果中提取竞品列表"""
+    """从 JustOneAPI Amazon 搜索结果中提取竞品列表（多字段名容错）"""
     competitors = []
-    products = search_data.get("data", {}).get("products", []) if search_data else []
+    if not search_data:
+        return competitors
+    data = search_data.get("data", {})
+    # 兼容 items / products 两种字段名
+    products = data.get("products", []) or data.get("items", [])
     for p in products[:15]:
+        # 价格容错：依次尝试多个字段（含 JustOneAPI 实际字段名 product_price）
+        price = _safe_parse_price(
+            p.get("price") or p.get("product_price") or p.get("price_value") or p.get("display_price") or p.get("min_price") or p.get("product_minimum_offer_price")
+        )
+        rating = _safe_parse_price(p.get("rating") or p.get("star_rating") or p.get("product_star_rating"))
+        review_count = 0
+        rc = p.get("review_count") or p.get("reviews") or p.get("ratings_total") or p.get("product_num_ratings") or 0
+        if isinstance(rc, int):
+            review_count = rc
+        elif isinstance(rc, str):
+            import re
+            m = re.search(r"[\d,]+", rc.replace(",", ""))
+            review_count = int(m.group()) if m else 0
+
         competitors.append({
             "asin": p.get("asin", ""),
-            "title": p.get("title", "")[:80],
-            "price": p.get("price"),
-            "rating": p.get("rating"),
-            "review_count": p.get("reviews", 0) if isinstance(p.get("reviews"), int) else 0,
+            "title": (p.get("title", "") or p.get("product_title", ""))[:80],
+            "price": price,
+            "rating": rating,
+            "review_count": review_count,
         })
     return competitors
 
@@ -321,6 +448,26 @@ async def _fetch_shopee_real_data(title: str, category: str, market: str) -> Opt
         return None
 
 
+def _extract_reviews_summary(reviews_data: list, max_reviews: int = 10) -> str:
+    """从评论数据中提取可读的评论摘要"""
+    if not reviews_data:
+        return ""
+    lines = []
+    for rd in reviews_data:
+        asin = rd.get("asin", "")
+        data = rd.get("data", {})
+        reviews = data.get("reviews", []) or data.get("items", [])
+        for r in reviews[:max_reviews]:
+            title = r.get("title", "") or r.get("review_title", "")
+            body = r.get("body", "") or r.get("review_body", "") or r.get("content", "")
+            rating = r.get("rating") or r.get("star_rating") or r.get("score") or ""
+            # 截取前 150 字
+            body_short = body[:150] + "..." if len(body) > 150 else body
+            stars = f"★{rating}" if rating else ""
+            lines.append(f"  [{asin}] {stars} {title}: {body_short}")
+    return "\n".join(lines) if lines else ""
+
+
 async def _analyze_with_real_data(
     real_data: Dict, attrs: Dict, platform: str, market: str, kb_context: str
 ) -> Dict:
@@ -334,14 +481,35 @@ async def _analyze_with_real_data(
     else:
         competitors = _extract_competitors_from_search(search_results)
 
+    # 记录提取的竞品数据质量
+    prices_extracted = [c.get("price") for c in competitors if c.get("price")]
+    logger.info(
+        "竞品提取完成：%d 个竞品, %d 个有价格, 前3个: %s",
+        len(competitors), len(prices_extracted),
+        [(c.get("title", "")[:30], c.get("price"), c.get("rating"), c.get("review_count")) for c in competitors[:3]],
+    )
+
     competitors_summary = "\n".join([
         f"- {c.get('title','')[:60]} | ${c.get('price','')} | ★{c.get('rating','')} | {c.get('review_count',0)} reviews"
         for c in competitors[:10]
     ]) or "（无竞品数据）"
 
+    # ── 新增：评论摘要 ──
+    reviews_summary = _extract_reviews_summary(real_data.get("reviews", []))
+
     supply_price = attrs.get("supply_price_cny")
     supply_price_text = f"¥{supply_price}" if supply_price else "未知"
     source_label = f"{platform} 真实竞品数据"
+
+    # 构建评论部分 prompt
+    reviews_section = ""
+    if reviews_summary:
+        reviews_section = f"""
+【Top 竞品热门评论】（来自 JustOneAPI）：
+{reviews_summary}
+
+请从上述评论中提取买家真实痛点和关注点。
+"""
 
     user_prompt = f"""
 【目标上架平台】：{platform} ({market} 站点)
@@ -350,7 +518,7 @@ async def _analyze_with_real_data(
 
 【{source_label}】（来自 JustOneAPI）：
 {competitors_summary}
-
+{reviews_section}
 【参考电商知识库】：
 {kb_context}
 
@@ -376,7 +544,8 @@ async def _analyze_with_real_data(
         if competitors and not insights.get("competitors"):
             insights["competitors"] = competitors
         return insights
-    except Exception:
+    except Exception as e:
+        logger.exception("LLM 市场分析响应解析失败，降级为基于竞品数据的基本洞察: %s", e)
         # LLM 解析失败，返回基于真实数据的基本结构
         return _build_basic_insights_from_competitors(competitors, attrs, market)
 
@@ -475,7 +644,11 @@ async def market_node(state: AgentState) -> Dict[str, Any]:
     # ── 根据目标平台获取真实市场数据 ──
     real_market_data = None
     if platform == "Amazon":
-        real_market_data = await _fetch_amazon_real_data(title, category, market, search_query=amazon_search_query)
+        real_market_data = await _fetch_amazon_real_data(
+            title, category, market,
+            search_query=amazon_search_query,
+            search_queries=localized_search_queries,
+        )
     elif platform == "TikTok":
         real_market_data = await _fetch_tiktok_real_data(title, category, market)
     elif platform == "Shopee":
@@ -483,11 +656,21 @@ async def market_node(state: AgentState) -> Dict[str, Any]:
 
     if real_market_data:
         # 路径 A：有真实平台数据，LLM 在真实数据基础上分析
+        logger.info("路径 A：使用 JustOneAPI 真实数据进行市场分析")
         insights = await _analyze_with_real_data(real_market_data, attrs, platform, market, kb_context)
         insights["data_sources"] = real_market_data.get("sources", [f"JustOneAPI:{platform}"])
         insights["data_freshness"] = real_market_data.get("freshness", "")
+        competitors = insights.get("competitors", [])
+        prices = [c.get("price") for c in competitors if c.get("price")]
+        logger.info(
+            "路径 A 结果：竞品 %d 个, 有价格 %d 个, 价格范围 %s-%s, 关键词 %d 个",
+            len(competitors), len(prices),
+            min(prices) if prices else "N/A", max(prices) if prices else "N/A",
+            len(insights.get("top_keywords", [])),
+        )
     else:
         # 路径 B：无真实数据，降级为纯 LLM
+        logger.warning("路径 B：JustOneAPI 无数据，降级为纯 LLM 分析")
         insights = await _generate_llm_insights(attrs, platform, market, kb_context)
         insights["data_sources"] = ["LLM"]
         insights["data_freshness"] = ""

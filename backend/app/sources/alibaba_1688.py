@@ -110,38 +110,71 @@ def _map_to_product_profile(raw: Dict[str, Any], item_id: str) -> ProductProfile
         logger.error("JustOneAPI data 字段类型异常: %s (expected dict)", type(data).__name__)
         data = {}
 
-    # ── 基础信息 ──
-    title = data.get("title", "")
-    offer_id = str(data.get("offer_id", item_id))
+    # -- 基础信息 (data.item.offerTitle) --
+    item = data.get("item") or {}
+    title = item.get("offerTitle", "") or ""
+    # 降级：某些响应可能 title 在顶层（但非 tag 对象）
+    if not title:
+        top_title = data.get("title", "")
+        if isinstance(top_title, str):
+            title = top_title
+    offer_id = str(item.get("offerId") or data.get("offer_id", item_id))
 
-    # ── 供应商 ──
-    supplier = data.get("supplier_info", {})
-    supplier_name = supplier.get("company_name", "") or supplier.get("shop_name", "")
+    # -- 供应商 --
+    supplier = data.get("supplier_info") or data.get("supplierInfo") or {}
+    supplier_name = supplier.get("company_name", "") or supplier.get("shop_name") or supplier.get("companyName", "")
 
-    # ── 价格 ──
-    price_info = data.get("price_info", {})
-    supply_price = _parse_1688_price(
-        price_info.get("retail_price")
-        or (price_info.get("step_price", [{}])[0].get("price") if price_info.get("step_price") else None)
-    )
+    # -- 价格 (data.item.price -> data.price.priceModel.currentPrices) --
+    raw_price = item.get("price")
+    if raw_price:
+        supply_price = _parse_1688_price(raw_price)
+    else:
+        price_data = data.get("price") or {}
+        model = (price_data.get("priceModel") or {})
+        tiers = model.get("currentPrices") or []
+        supply_price = _parse_1688_price(tiers[0].get("price") if tiers else None)
 
-    # ── 库存 / 发货 ──
-    stock_info = data.get("stock_info", {})
+    # -- 库存 / 发货 --
+    stock_info = data.get("stock_info") or data.get("stockInfo") or {}
     moq = stock_info.get("moq")
-    delivery_time_str = stock_info.get("delivery_time", "")
+    delivery_time_str = stock_info.get("delivery_time", "") or stock_info.get("deliveryTime", "")
     lead_time_days: Optional[int] = None
     dm = re.search(r"(\d+)", delivery_time_str)
     if dm:
         lead_time_days = int(dm.group(1))
 
-    # ── 图片 ──
-    image_info = data.get("image_info", {})
-    main_images: List[str] = image_info.get("main_images", []) or []
-    detail_images: List[str] = image_info.get("detail_images", []) or []
+    # -- 图片: mainPic.offerImgList -> mainPic.offerImages -> images 降级 --
+    main_images: List[str] = []
+    detail_images: List[str] = []
+    main_pic = data.get("mainPic") or {}
+    img_list = main_pic.get("offerImgList") or []
+    main_images = [u for u in img_list if isinstance(u, str)]
+    if not main_images:
+        img_objs = main_pic.get("offerImages") or []
+        for obj in img_objs:
+            u = obj.get("imgUrl", "") if isinstance(obj, dict) else ""
+            if u:
+                main_images.append(u)
+    if not main_images:
+        for obj in (data.get("images") or []):
+            if isinstance(obj, dict):
+                u = obj.get("imageURI") or obj.get("size220x220ImageURI") or ""
+            else:
+                u = str(obj) if obj else ""
+            if u:
+                main_images.append(u)
+            if len(main_images) >= 8:
+                break
     all_images = main_images + detail_images
 
-    # ─ 产品参数 → 属性提取 ──
-    product_params: List[Dict] = data.get("product_params", []) or []
+    # -- 产品参数 -> 属性提取 (data.attribute.propsList) --
+    product_params: List[Dict] = []
+    attr = data.get("attribute") or {}
+    for prop in (attr.get("propsList") or []):
+        product_params.append({"name": prop.get("name", ""), "value": prop.get("value", "")})
+    # 降级：旧路径
+    if not product_params:
+        product_params = data.get("product_params", []) or []
     materials: List[str] = []
     design_features: List[str] = []
     key_specs: List[str] = []
@@ -158,8 +191,7 @@ def _map_to_product_profile(raw: Dict[str, Any], item_id: str) -> ProductProfile
         else:
             key_specs.append(f"{param.get('name', '')}: {value}")
 
-    # ── SKU → 颜色 / 尺码 ──
-    sku_list: List[Dict] = data.get("sku_list", []) or []
+    # -- SKU -> 颜色 / 尺码 (从 propsList 的 value 中解析) --
     colors: List[str] = []
     sizes: List[str] = []
     _color_kw = {"红", "橙", "黄", "绿", "蓝", "紫", "黑", "白", "灰", "粉", "棕", "金", "银", "米", "卡其", "驼", "藏青", "军绿",
@@ -167,8 +199,10 @@ def _map_to_product_profile(raw: Dict[str, Any], item_id: str) -> ProductProfile
     _size_kw = {"xs", "s", "m", "l", "xl", "xxl", "xxxl", "均码", "one size", "free size", "cm", "码"}
 
     seen_colors, seen_sizes = set(), set()
+    # 优先从 sku_list 解析（如果存在）
+    sku_list: List[Dict] = data.get("sku_list") or data.get("skuList") or []
     for sku in sku_list:
-        spec = (sku.get("spec_text", "") or "").lower()
+        spec = (sku.get("spec_text", "") or sku.get("specText", "") or "").lower()
         for token in re.split(r"[\s,/，、]+", spec):
             token_stripped = token.strip()
             if not token_stripped:
@@ -179,6 +213,22 @@ def _map_to_product_profile(raw: Dict[str, Any], item_id: str) -> ProductProfile
             if any(kw in token_stripped for kw in _size_kw) and token_stripped not in seen_sizes:
                 sizes.append(token_stripped)
                 seen_sizes.add(token_stripped)
+    # 降级：从产品参数的值中尝试提取颜色/尺码
+    if not colors and not sizes:
+        for param in product_params:
+            value = param.get("value", "")
+            if not value:
+                continue
+            for token in re.split(r"[,，、/\s]+", value):
+                t = token.strip().lower()
+                if not t:
+                    continue
+                if any(kw in t for kw in _color_kw) and t not in seen_colors:
+                    colors.append(t)
+                    seen_colors.add(t)
+                if any(kw in t for kw in _size_kw) and t not in seen_sizes:
+                    sizes.append(t)
+                    seen_sizes.add(t)
 
     # ── 品类推断 ──
     category_family = _infer_category_family(title, product_params)
@@ -191,8 +241,8 @@ def _map_to_product_profile(raw: Dict[str, Any], item_id: str) -> ProductProfile
     # ── 动态置信度：基于字段完整性 ──
     confidence = _compute_confidence(
         data,
-        required_fields=["title", "price_info", "image_info", "supplier_info", "product_params", "sku_list"],
-        optional_fields=["stock_info", "sales_info"],
+        required_fields=["item", "mainPic", "price", "attribute"],
+        optional_fields=["stock_info", "stockInfo", "supplier_info"],
     )
 
     return ProductProfile(
@@ -344,18 +394,32 @@ class Alibaba1688Source(ResearchSource):
         if not isinstance(data, dict):
             data = {}
 
-        price_info = data.get("price_info", {}) or {}
-        stock_info = data.get("stock_info", {}) or {}
-        supplier = data.get("supplier_info", {}) or {}
+        item = data.get("item") or {}
+        # 价格: item.price -> price.priceModel.currentPrices
+        raw_price = item.get("price")
+        retail_price = None
+        step_prices = []
+        if raw_price:
+            retail_price = _parse_1688_price(raw_price)
+        else:
+            price_data = data.get("price") or {}
+            model = price_data.get("priceModel") or {}
+            tiers = model.get("currentPrices") or []
+            if tiers:
+                retail_price = _parse_1688_price(tiers[0].get("price"))
+                step_prices = [{"begin_amount": t.get("beginAmount"), "price": t.get("price")} for t in tiers]
+        # 库存 / 发货
+        stock_info = data.get("stock_info") or data.get("stockInfo") or {}
+        supplier = data.get("supplier_info") or data.get("supplierInfo") or {}
 
         return {
             "offer_id": offer_id,
-            "retail_price": price_info.get("retail_price"),
-            "step_prices": price_info.get("step_price", []),
+            "retail_price": retail_price,
+            "step_prices": step_prices,
             "moq": stock_info.get("moq"),
-            "total_stock": stock_info.get("total_stock"),
-            "delivery_time": stock_info.get("delivery_time"),
-            "delivery_place": stock_info.get("delivery_place"),
-            "supplier_name": supplier.get("company_name") or supplier.get("shop_name"),
-            "month_sales": (data.get("sales_info") or {}).get("month_sales"),
+            "total_stock": stock_info.get("total_stock") or stock_info.get("totalStock"),
+            "delivery_time": stock_info.get("delivery_time") or stock_info.get("deliveryTime"),
+            "delivery_place": stock_info.get("delivery_place") or stock_info.get("deliveryPlace"),
+            "supplier_name": supplier.get("company_name") or supplier.get("shop_name") or supplier.get("companyName"),
+            "month_sales": (data.get("sales_info") or data.get("salesInfo") or {}).get("month_sales"),
         }

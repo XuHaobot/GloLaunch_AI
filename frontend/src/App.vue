@@ -1,34 +1,39 @@
 <template>
   <div class="app-layout">
-    <AppSidebar :active="activeView" @navigate="switchView" />
+    <AppSidebar :active="activeView" :running-node="runningNode" :completed-nodes="completedNodes" @navigate="switchView" />
 
     <div class="main-area">
-    <!-- 工作台视图（v-show 保留运行状态） -->
-    <div class="view-workbench" v-show="activeView === 'workbench'">
+    <!-- 工作台视图（始终可见，侧边栏控制滚动到各区块） -->
+    <div class="view-workbench">
     <!-- 顶部导航栏 -->
     <header class="navbar">
       <div class="brand">
         <div class="logo-icon"><el-icon><Promotion /></el-icon></div>
         <div class="brand-text">
           <span class="brand-title">GloLaunch AI</span>
-          <span class="brand-subtitle">AI 全链路跨境智能上新引擎 (LangGraph Core)</span>
+          <span class="brand-subtitle">AI-Powered Cross-Border Product Launch Workspace</span>
         </div>
       </div>
       <div class="nav-actions">
+        <!-- 执行进度指示 -->
+        <div class="eta-indicator" v-if="isRunning">
+          <el-icon class="is-loading" color="#38bdf8"><Loading /></el-icon>
+          <span class="eta-text">
+            执行中 · 预计还需约 <strong>{{ etaSeconds }}</strong> 秒
+          </span>
+        </div>
+        <div class="eta-indicator done" v-else-if="completedNodes.length > 0">
+          <el-icon color="#22c55e"><CircleCheckFilled /></el-icon>
+          <span class="eta-text">全链路执行完毕</span>
+        </div>
         <el-tag type="success" effect="plain" class="token-plan-tag">
           <el-icon><Check /></el-icon> 专属 Token Plan 连接正常
         </el-tag>
         <el-button plain size="small" @click="openBatchDialog">
           <el-icon><Files /></el-icon> 批量上新 (CSV)
         </el-button>
-        <el-button plain size="small" @click="showGraph = !showGraph">
-          <el-icon><component :is="showGraph ? 'Fold' : 'Expand'" /></el-icon> {{ showGraph ? '收起拓扑' : '展开拓扑' }}
-        </el-button>
         <el-button plain size="small" @click="openVersionDrawer">
           <el-icon><Switch /></el-icon> 版本对比
-        </el-button>
-        <el-button plain size="small" @click="switchView('tasks')">
-          <el-icon><Clock /></el-icon> 任务历史
         </el-button>
         <el-button type="primary" plain size="small" @click="resetAll">
           <el-icon><RefreshRight /></el-icon> 新建上新任务
@@ -38,25 +43,10 @@
 
     <!-- 主操作区 -->
     <main class="main-content">
-      <!-- 顶部 LangGraph 决策图执行状态（可折叠以获得单屏空间） -->
-      <section class="graph-section" v-show="showGraph">
-        <AgentGraph 
-          :running-node="runningNode" 
-          :completed-nodes="completedNodes" 
-          :planned-nodes="plannedNodes" 
-          :stages="plannedStages" 
-          :intent="form.intent"
-          :trace-logs="traceLogs"
-          :is-running="isRunning"
-          :eta-seconds="etaSeconds"
-          :node-durations="nodeDurations"
-        />
-      </section>
-
       <!-- 双栏布局：左侧交互与配置，右侧全链路成果看板 -->
       <div class="workspace-grid">
         <!-- 左侧：输入与控制面板 -->
-        <div class="left-panel">
+        <div ref="sectionNewProduct" class="left-panel">
           <el-card shadow="never" class="control-card">
             <template #header>
               <div class="card-header">
@@ -106,9 +96,9 @@
               </el-row>
 
               <el-form-item label="商品主图 URL / 拍摄图">
-                <el-input v-model="form.product_image_url" placeholder="输入图片链接，或上传本地图片 / 导入 1688">
+                <el-input v-model="form.product_image_url" placeholder="可直接粘贴商品图片网络链接（如 https://...），或点击下方按钮上传本地图片 / 导入 1688">
                   <template #append>
-                    <el-button @click="showImagePreview = true">预览</el-button>
+                    <el-button @click="showImagePreview = true" :disabled="!form.product_image_url">预览</el-button>
                   </template>
                 </el-input>
                 <div class="image-action-row">
@@ -127,18 +117,20 @@
                 </div>
               </el-form-item>
 
-              <!-- 图片预览小图 -->
-              <div class="image-thumb-box" v-if="form.product_image_url">
+              <!-- 图片预览小图（点击放大） -->
+              <div class="image-thumb-box" v-if="form.product_image_url" @click="openImagePreview(form.product_image_url, '多模态识别源图')">
                 <img :src="form.product_image_url" alt="商品预览" class="thumb-img" />
-                <div class="thumb-tag">多模态识别源图</div>
+                <div class="thumb-tag">
+                  <el-icon><ZoomIn /></el-icon> 多模态识别源图 · 点击放大
+                </div>
               </div>
 
-              <el-form-item label="Agent 自然语言指令">
+              <el-form-item label="上新指令">
                 <el-input 
                   v-model="form.message" 
                   type="textarea" 
-                  :rows="2" 
-                  placeholder="例如：帮我把这款夏季法式复古碎花连衣裙做全链路上新，挖掘美区高转化词并生成专业 Listing 与试穿拍摄。"
+                  :rows="3" 
+                  placeholder="请输入您的上新意图（即使只输入一句话如「帮我上架这款冲锋衣」，AI 也会自动结合图片多模态识别并完成全链路决策；也可补充目标卖点、客群或特殊要求）"
                 />
               </el-form-item>
 
@@ -150,7 +142,7 @@
                 @click="startLaunch"
               >
                 <el-icon><CaretRight /></el-icon>
-                {{ isRunning ? 'LangGraph Agent 正在全链路生成中...' : '一键启动 AI 全链路上新' }}
+                {{ isRunning ? 'AI 正在全链路生成中...' : '一键启动 AI 全链路上新' }}
               </el-button>
 
               <!-- 失败断点续跑提示 -->
@@ -164,14 +156,18 @@
           </el-card>
         </div>
 
-        <!-- 右侧：出海全链路生成结果面板 (Tab 切换) -->
+        <!-- 右侧：场景上新全链路成果看板（6 大区块） -->
         <div class="right-panel">
-          <el-card shadow="never" class="results-card">
-            <el-tabs v-model="activeTab" class="custom-tabs">
-              <!-- Tab 1: Listing 与文案 -->
-              <el-tab-pane label="平台 Listing" name="listing">
+          <div class="sections-container">
+              <!-- ═══ Section: Listing ═══ -->
+              <div ref="sectionListing" class="result-section">
+                <el-card shadow="never" class="section-card">
+                <div class="section-header">
+                  <h3 class="section-title"><el-icon><Document /></el-icon> Listing</h3>
+                  <el-tag v-if="resultData.listing_health" size="small" :type="resultData.listing_health.grade === 'A' ? 'success' : resultData.listing_health.grade === 'B' ? '' : 'warning'">质量 {{ resultData.listing_health.grade }} 级</el-tag>
+                </div>
                 <div v-if="!resultData.listing_content" class="empty-state">
-                  <el-empty description="启动 Agent 后此处将展示根据市场洞察生成的专业出海 Listing" />
+                  <el-empty description="启动上新后此处将展示根据市场洞察生成的专业出海 Listing" />
                 </div>
                 <div v-else class="listing-view">
                   <div class="result-block">
@@ -206,12 +202,50 @@
                     <div class="desc-box">{{ resultData.listing_content.product_description }}</div>
                   </div>
                 </div>
-              </el-tab-pane>
 
-              <!-- Tab 2: 市场洞察与选品评估 -->
-              <el-tab-pane label="市场洞察报告" name="market">
+                <!-- Listing Health 子区块 -->
+                <div class="sub-section" v-if="resultData.listing_health">
+                  <div class="sub-section-label">Listing 质量评估</div>
+                  <div class="health-header">
+                    <div class="grade-badge" :class="'grade-' + resultData.listing_health.grade">
+                      {{ resultData.listing_health.grade }}
+                    </div>
+                    <div class="health-meta">
+                      <span class="health-total">综合评分 <strong>{{ resultData.listing_health.total_score?.toFixed(1) }}</strong> / 100</span>
+                      <span class="health-grade-text">{{ resultData.listing_health.grade_description }}</span>
+                    </div>
+                  </div>
+                  <div class="health-dim-grid">
+                    <div v-for="dim in resultData.listing_health.dimensions" :key="dim.name" class="health-dim-card">
+                      <div class="dim-card-header">
+                        <span class="dim-card-name">{{ dim.name }}</span>
+                        <span class="dim-card-score" :style="{ color: dim.score >= 80 ? '#22c55e' : dim.score >= 60 ? '#f59e0b' : '#ef4444' }">{{ dim.score?.toFixed(0) }}</span>
+                      </div>
+                      <el-progress :percentage="dim.score" :show-text="false" :color="dim.score >= 80 ? '#22c55e' : dim.score >= 60 ? '#f59e0b' : '#ef4444'" :stroke-width="6" />
+                      <p class="dim-card-feedback" v-if="dim.feedback">{{ dim.feedback }}</p>
+                    </div>
+                  </div>
+                  <div class="improvement-priorities" v-if="resultData.listing_health.improvement_priorities?.length">
+                    <div class="block-label">改进建议</div>
+                    <el-timeline>
+                      <el-timeline-item v-for="(imp, idx) in resultData.listing_health.improvement_priorities" :key="idx" :type="idx === 0 ? 'danger' : idx === 1 ? 'warning' : 'info'" :timestamp="'优先级 #' + (idx + 1)">
+                        {{ imp }}
+                      </el-timeline-item>
+                    </el-timeline>
+                  </div>
+                </div>
+                </el-card>
+              </div>
+
+              <!-- ═══ Section: 市场调研 (Research) ═══ -->
+              <div ref="sectionResearch" class="result-section">
+                <el-card shadow="never" class="section-card">
+                <div class="section-header">
+                  <h3 class="section-title"><el-icon><DataAnalysis /></el-icon> 市场调研</h3>
+                  <el-tag v-if="resultData.opportunity_score" size="small" :type="resultData.opportunity_score.total_score >= 70 ? 'success' : 'warning'">Opportunity {{ resultData.opportunity_score.total_score?.toFixed(0) }}</el-tag>
+                </div>
                 <div v-if="!resultData.market_insights" class="empty-state">
-                  <el-empty description="Qwen3.8-Max 深度推理的市场趋势与选品报告将在此呈现" />
+                  <el-empty description="启动上新后此处将展示真实市场数据驱动的洞察报告" />
                 </div>
                 <div v-else class="market-view">
                   <el-row :gutter="12" class="metric-row">
@@ -265,12 +299,13 @@
                     </div>
                   </div>
                 </div>
-              </el-tab-pane>
 
-              <!-- Tab 2.5: 爆款对标策略 -->
-              <el-tab-pane label="爆款对标" name="benchmark">
+                <!-- 爆款对标子区块 -->
+                <div class="sub-section">
+                  <div class="sub-section-label">爆款对标策略</div>
+                </div>
                 <div v-if="!resultData.trend_benchmark" class="empty-state">
-                  <el-empty description="同类爆款的标题公式与流量词埋词策略将在此呈现（Listing 据此改写而非直译）" />
+                  <el-empty description="同类爆款的标题公式与流量词埋词策略将在此呈现" />
                 </div>
                 <div v-else class="benchmark-view">
                   <div class="result-block">
@@ -302,29 +337,142 @@
                     <p class="text-p">{{ resultData.trend_benchmark.localization_notes }}</p>
                   </div>
                 </div>
-              </el-tab-pane>
+                </el-card>
+              </div>
 
-              <!-- Tab 3: AI 拍摄与虚拟试穿 -->
-              <el-tab-pane label="AI 拍摄素材工坊" name="studio">
+              <!-- ═══ Section: 上新计划 (Launch Plan) ═══ -->
+              <div ref="sectionLaunchPlan" class="result-section">
+                <el-card shadow="never" class="section-card">
+                <div class="section-header">
+                  <h3 class="section-title"><el-icon><TrendCharts /></el-icon> 上新计划</h3>
+                  <el-tag v-if="resultData.opportunity_score" size="small" :type="resultData.opportunity_score.recommendation === '强烈推荐' ? 'success' : 'warning'">{{ resultData.opportunity_score.go_no_go }}</el-tag>
+                </div>
+
+                <!-- Opportunity Score 子区块 -->
+                <div v-if="resultData.opportunity_score" class="sub-section">
+                  <div class="sub-section-label">Opportunity Score · 选品决策评分</div>
+                  <div class="score-header">
+                    <div class="total-score-ring">
+                      <svg viewBox="0 0 120 120" class="score-ring-svg">
+                        <circle cx="60" cy="60" r="52" fill="none" stroke="var(--el-border-color-lighter)" stroke-width="8" />
+                        <circle cx="60" cy="60" r="52" fill="none"
+                          :stroke="(resultData.opportunity_score.overall_score || resultData.opportunity_score.total_score || 0) >= 70 ? '#22c55e' : (resultData.opportunity_score.overall_score || resultData.opportunity_score.total_score || 0) >= 50 ? '#f59e0b' : '#94a3b8'"
+                          stroke-width="8" stroke-linecap="round"
+                          :stroke-dasharray="`${(((resultData.opportunity_score.overall_score || resultData.opportunity_score.total_score || 0)) / 100) * 327} 327`"
+                          transform="rotate(-90 60 60)" />
+                      </svg>
+                      <div class="score-ring-text">
+                        <span class="score-number">{{ resultData.opportunity_score.overall_score != null ? resultData.opportunity_score.overall_score : (resultData.opportunity_score.total_score != null ? resultData.opportunity_score.total_score.toFixed(0) : '待测') }}</span>
+                        <span class="score-label">综合评分</span>
+                      </div>
+                    </div>
+                    <div class="score-summary">
+                      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                        <el-tag :type="resultData.opportunity_score.recommendation === '强烈推荐' ? 'success' : (resultData.opportunity_score.recommendation === '谨慎' || resultData.opportunity_score.recommendation === '谨慎观望') ? 'warning' : 'info'" size="large" effect="dark">
+                          {{ resultData.opportunity_score.recommendation || '市场分析中' }}
+                        </el-tag>
+                        <el-tag size="small" type="info">数据可信度: {{ resultData.opportunity_score.data_confidence === 'high' ? '高' : (resultData.opportunity_score.data_confidence === 'medium' ? '中' : '初探/启发式') }}</el-tag>
+                      </div>
+                      <p class="recommendation-text">{{ resultData.opportunity_score.summary || (resultData.opportunity_score.action_items || []).join('；') || '已根据商品特征与市场热度完成出海选品综合评估' }}</p>
+                      <div class="platform-recs" v-if="resultData.opportunity_score.platform_recommendations?.length">
+                        <span class="rec-label">推荐平台：</span>
+                        <el-tag v-for="pr in resultData.opportunity_score.platform_recommendations" :key="pr.platform" size="small" effect="plain" class="rec-tag">
+                          {{ pr.platform }} ({{ pr.suitability_score || pr.score || 80 }}分)
+                        </el-tag>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 六维评分条（有具体维度时展示） -->
+                  <div class="dimension-bars" v-if="resultData.opportunity_score.dimensions?.length">
+                    <div v-for="dim in resultData.opportunity_score.dimensions" :key="dim.name" class="dim-row">
+                      <span class="dim-name">{{ dim.name }}</span>
+                      <el-progress :percentage="dim.score || 0" :color="(dim.score || 0) >= 70 ? '#22c55e' : (dim.score || 0) >= 50 ? '#f59e0b' : '#94a3b8'" :stroke-width="14" :show-text="true" />
+                      <span class="dim-weight" v-if="dim.weight">权重 {{ ((dim.weight || 0) * 100).toFixed(0) }}%</span>
+                    </div>
+                  </div>
+
+                  <!-- Supply-Market Fit 结论 -->
+                  <div class="supply-market-fit" v-if="resultData.opportunity_score.supply_market_fit">
+                    <div class="block-label">Supply-Market Fit 匹配度判定</div>
+                    <el-alert 
+                      :title="typeof resultData.opportunity_score.supply_market_fit === 'object' ? (resultData.opportunity_score.supply_market_fit.verdict || 'Supply-Market Fit 分析完成') : ('匹配度评级：' + (resultData.opportunity_score.supply_market_fit === 'high' ? '高度匹配' : (resultData.opportunity_score.supply_market_fit === 'medium' ? '中等匹配' : '建议深挖卖点')))" 
+                      :type="(resultData.opportunity_score.supply_market_fit === 'high' || (resultData.opportunity_score.supply_market_fit?.fit_score >= 70)) ? 'success' : 'warning'" 
+                      :description="typeof resultData.opportunity_score.supply_market_fit === 'object' ? resultData.opportunity_score.supply_market_fit.explanation : (resultData.opportunity_score.fit_reasoning || '商品特征已对齐目标站点的买家画像与品类趋势')" 
+                      show-icon 
+                      :closable="false" 
+                    />
+                  </div>
+                </div>
+
+                <!-- Asset Gap 子区块 -->
+                <div class="sub-section" v-if="resultData.asset_inventory || resultData.asset_gap">
+                  <div class="sub-section-label">素材盘点与缺口分析</div>
+                  <div class="inventory-summary" v-if="resultData.asset_inventory">
+                    <el-row :gutter="16">
+                      <el-col :span="8">
+                        <el-statistic title="已有素材" :value="resultData.asset_inventory.total_count || 0">
+                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> 项</span></template>
+                        </el-statistic>
+                      </el-col>
+                      <el-col :span="8">
+                        <el-statistic title="覆盖类型" :value="resultData.asset_inventory.covered_types?.length || 0">
+                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> / {{ resultData.asset_inventory.required_types?.length || 0 }} 类</span></template>
+                        </el-statistic>
+                      </el-col>
+                      <el-col :span="8">
+                        <el-statistic title="AI 补齐" :value="resultData.asset_inventory.ai_generated_count || 0">
+                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> 项</span></template>
+                        </el-statistic>
+                      </el-col>
+                    </el-row>
+                  </div>
+                  <div class="gap-list" v-if="resultData.asset_gap?.items?.length">
+                    <div class="block-label">缺口清单（仅补齐缺失项，已有素材优先复用）</div>
+                    <div v-for="(gap, idx) in resultData.asset_gap.items" :key="idx" class="gap-item">
+                      <div class="gap-item-header">
+                        <el-tag :type="gap.priority === 'high' ? 'danger' : gap.priority === 'medium' ? 'warning' : 'info'" size="small">{{ gap.priority === 'high' ? '必需' : gap.priority === 'medium' ? '建议' : '可选' }}</el-tag>
+                        <span class="gap-asset-type">{{ gap.asset_type }}</span>
+                        <span class="gap-status" :class="gap.status">{{ gap.status === 'missing' ? '缺失' : gap.status === 'generated' ? '已 AI 补全' : '已搬运' }}</span>
+                      </div>
+                      <p class="gap-reason" v-if="gap.reason">{{ gap.reason }}</p>
+                    </div>
+                  </div>
+                  <el-empty v-else-if="resultData.asset_gap" description="所有必需素材已齐备，无缺口" :image-size="60" />
+                </div>
+
+                <div v-if="!resultData.opportunity_score && !resultData.asset_gap" class="empty-state">
+                  <el-empty description="启动上新后此处将展示选品评分与素材缺口分析" />
+                </div>
+                </el-card>
+              </div>
+
+              <!-- ═══ Section: 素材工坊 (Studio) ═══ -->
+              <div ref="sectionStudio" class="result-section">
+                <el-card shadow="never" class="section-card">
+                <div class="section-header">
+                  <h3 class="section-title"><el-icon><Camera /></el-icon> 素材工坊</h3>
+                  <el-tag size="small" type="info">已有素材优先 · AI 按需补齐</el-tag>
+                </div>
                 <div v-if="!resultData.studio_assets" class="empty-state">
-                  <el-empty description="AI 场景图与本地化详情图将在此呈现（搬运商品可直接使用原素材，AI 生成按需触发）" />
+                  <el-empty description="AI 场景图与本地化素材将在此呈现（已有素材优先复用，AI 仅补齐缺口）" />
                 </div>
                 <div v-else class="studio-view">
                   <!-- 详情页图片文字本地化 -->
                   <div class="studio-section" v-if="resultData.localized_images">
                     <div class="block-label">
                       详情页图片文字本地化（→ {{ (resultData.localized_images.target_language || 'en').toUpperCase() }}）
-                      <el-tag size="small" :type="resultData.localized_images.engine === 'aliyun_image_translation' ? 'success' : 'warning'">
-                        {{ resultData.localized_images.engine === 'aliyun_image_translation' ? '阿里云电商图翻' : 'Qwen-VL 识别翻译' }}
+                      <el-tag size="small" :type="resultData.localized_images.engine === 'aliyun_image_translation' ? 'success' : (resultData.localized_images.engine === 'ai_image_edit' ? 'success' : (resultData.localized_images.engine === 'qwen_vl_pillow_overlay' ? 'success' : 'warning'))">
+                        {{ resultData.localized_images.engine === 'aliyun_image_translation' ? '阿里云电商图翻' : (resultData.localized_images.engine === 'ai_image_edit' ? 'AI 图片重绘' : (resultData.localized_images.engine === 'qwen_vl_pillow_overlay' ? 'AI 识别+叠层渲染' : 'Qwen-VL 识别翻译')) }}
                       </el-tag>
                     </div>
                     <div v-for="(item, idx) in resultData.localized_images.items" :key="idx" class="localize-pair">
-                      <div class="localize-col">
+                      <div class="localize-col" @click="openImagePreview(item.source_image, '中文原图')">
                         <img :src="item.source_image" class="localize-img" alt="中文原图" />
-                        <div class="localize-cap">中文原图</div>
+                        <div class="localize-cap">中文原图 · 点击放大</div>
                       </div>
                       <div class="localize-arrow">→</div>
-                      <div class="localize-col">
+                      <div class="localize-col" @click="item.localized_image && openImagePreview(item.localized_image, '译后成品图')" :style="{ cursor: item.localized_image ? 'pointer' : 'default' }">
                         <img v-if="item.localized_image" :src="item.localized_image" class="localize-img" alt="译后图" />
                         <div v-else class="localize-fallback">
                           <div v-for="(t, ti) in (item.texts || [])" :key="ti" class="text-pair">
@@ -344,7 +492,7 @@
                       虚拟试穿（服装增值服务）
                       <el-tag size="small" type="info">按需生成 · 不在主流水线内</el-tag>
                     </div>
-                    <div class="tryon-banner" v-if="tryonResult">
+                    <div class="tryon-banner" v-if="tryonResult" @click="openImagePreview(tryonResult.tryon_image_url, '虚拟试穿效果图')" style="cursor:pointer">
                       <img :src="tryonResult.tryon_image_url" alt="虚拟试穿" class="tryon-img" />
                       <div class="tryon-details">
                         <div class="tryon-badge">模特特征：{{ tryonResult.model_type }}</div>
@@ -383,6 +531,8 @@
                         v-for="(scene, idx) in resultData.studio_assets.lifestyle_scenes" 
                         :key="idx" 
                         class="scene-card"
+                        @click="openImagePreview(scene.image_url, scene.scene_name || '场景图')"
+                        style="cursor:pointer"
                       >
                         <img :src="scene.image_url" :alt="scene.scene_name" class="scene-img" />
                         <div class="scene-caption">{{ scene.scene_name }}</div>
@@ -390,57 +540,126 @@
                     </div>
                   </div>
                 </div>
-              </el-tab-pane>
 
-              <!-- Tab 3.5: 商品展示带货视频 -->
-              <el-tab-pane label="带货视频" name="video">
-                <div v-if="!resultData.video_package" class="empty-state">
-                  <el-empty description="商品展示带货视频：分镜脚本、TTS 配音与成片将在此呈现" />
-                </div>
-                <div v-else class="video-view">
-                  <div class="result-block">
-                    <div class="block-label">
-                      <span>视频总览</span>
-                      <el-tag size="small" :type="videoModeTagType">{{ videoModeLabel }}</el-tag>
-                    </div>
-                    <div class="video-hook">{{ resultData.video_package.title_hook }}</div>
-                    <p class="text-p"><strong>BGM 风格：</strong>{{ resultData.video_package.bgm_style }}</p>
-                    <p class="text-p"><strong>时长：</strong>约 {{ resultData.video_package.duration_seconds }} 秒 · 投放平台 {{ resultData.video_package.platform }}</p>
-                    <video v-if="resultData.video_package.video_url" :src="resultData.video_package.video_url" controls class="video-player"></video>
-                    <div v-if="resultData.video_package.audio_url" class="audio-row">
-                      <span class="audio-label">TTS 配音（目标市场语言）</span>
-                      <audio :src="resultData.video_package.audio_url" controls class="audio-player"></audio>
-                    </div>
-                    <el-alert v-if="resultData.video_package.fallback_note" :title="resultData.video_package.fallback_note" type="warning" :closable="false" style="margin-top: 8px;" />
+                <!-- 带货视频 (占位 · 按需生成) -->
+                <div class="studio-section">
+                  <div class="block-label">
+                    带货视频
+                    <el-tag size="small" type="info">占位保留 · 按需生成</el-tag>
                   </div>
-                  <div class="result-block">
-                    <div class="block-label">分镜脚本（{{ resultData.video_package.storyboard.length }} 镜）</div>
-                    <div v-for="(shot, i) in resultData.video_package.storyboard" :key="i" class="shot-card">
-                      <div class="shot-num">{{ i + 1 }}</div>
-                      <div class="shot-body">
-                        <div class="shot-scene">{{ shot.scene }} <span class="shot-cam">{{ shot.camera }}</span></div>
-                        <div class="shot-voiceover">{{ shot.voiceover }}</div>
+                  <div v-if="videoResult">
+                    <div class="video-view">
+                      <div class="result-block">
+                        <div class="block-label">
+                          <span>视频总览</span>
+                          <el-tag size="small" :type="videoModeTagType">{{ videoModeLabel }}</el-tag>
+                        </div>
+                        <div class="video-hook">{{ videoResult.title_hook }}</div>
+                        <p class="text-p"><strong>BGM 风格：</strong>{{ videoResult.bgm_style }}</p>
+                        <p class="text-p"><strong>时长：</strong>约 {{ videoResult.duration_seconds }} 秒 · 投放平台 {{ videoResult.platform }}</p>
+                        <video v-if="videoResult.video_url" :src="videoResult.video_url" controls class="video-player"></video>
+                        <div v-if="videoResult.audio_url" class="audio-row">
+                          <span class="audio-label">TTS 配音（目标市场语言）</span>
+                          <audio :src="videoResult.audio_url" controls class="audio-player"></audio>
+                        </div>
+                        <el-alert v-if="videoResult.fallback_note" :title="videoResult.fallback_note" type="warning" :closable="false" style="margin-top: 8px;" />
                       </div>
-                      <div class="shot-duration">{{ shot.duration }}s</div>
+                      <div class="result-block" v-if="videoResult.storyboard && videoResult.storyboard.length">
+                        <div class="block-label">分镜脚本（{{ videoResult.storyboard.length }} 镜）</div>
+                        <div v-for="(shot, i) in videoResult.storyboard" :key="i" class="shot-card">
+                          <div class="shot-num">{{ i + 1 }}</div>
+                          <div class="shot-body">
+                            <div class="shot-scene">{{ shot.scene }} <span class="shot-cam">{{ shot.camera }}</span></div>
+                            <div class="shot-voiceover">{{ shot.voiceover }}</div>
+                          </div>
+                          <div class="shot-duration">{{ shot.duration }}s</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
+                  <div v-else class="tryon-actions">
+                    <el-button type="primary" :loading="videoLoading" @click="generateVideo">
+                      {{ videoLoading ? 'AI 视频生成中…' : '生成带货视频' }}
+                    </el-button>
+                    <span class="tryon-tip">根据 Listing 内容自动生成短视频分镜脚本与配音，按需触发不阻塞主流水线</span>
+                  </div>
                 </div>
-              </el-tab-pane>
+                </el-card>
+              </div>
 
-              <!-- Tab 4: 属性识别与发布包 -->
-              <el-tab-pane label="属性与发布包" name="package">
+              <!-- ═══ Section: 发布包 (Publish) ═══ -->
+              <div ref="sectionPublish" class="result-section">
+                <el-card shadow="never" class="section-card">
+                <div class="section-header">
+                  <h3 class="section-title"><el-icon><CircleCheck /></el-icon> 发布包</h3>
+                  <el-tag v-if="resultData.publish_package" size="small" :type="resultData.publish_package.review_decision === 'approved' ? 'success' : resultData.publish_package.review_decision === 'rejected' ? 'danger' : 'warning'">
+                    {{ resultData.publish_package.review_decision === 'approved' ? '已通过' : resultData.publish_package.review_decision === 'rejected' ? '已驳回' : '待审核' }}
+                  </el-tag>
+                </div>
                 <div v-if="!resultData.platform_package" class="empty-state">
                   <el-empty description="经平台规则校验的标准化发布包数据" />
                 </div>
                 <div v-else class="package-view">
                   <div class="result-block">
-                    <div class="block-label">Qwen3.7-Plus 视觉识别结构化属性</div>
-                    <div class="attr-grid" v-if="resultData.product_attributes">
-                      <div class="attr-item"><strong>品类：</strong>{{ resultData.product_attributes.category }}</div>
-                      <div class="attr-item"><strong>主色调：</strong>{{ resultData.product_attributes.main_color }}</div>
-                      <div class="attr-item"><strong>面料材质：</strong>{{ (resultData.product_attributes.materials || []).join(', ') }}</div>
-                      <div class="attr-item"><strong>版型设计：</strong>{{ (resultData.product_attributes.design_features || []).join(', ') }}</div>
-                      <div class="attr-item"><strong>适用季节：</strong>{{ resultData.product_attributes.season }}</div>
+                    <div class="block-label" style="display:flex;align-items:center;justify-content:space-between">
+                      <span>Qwen3.7-Plus 视觉识别结构化属性</span>
+                      <el-button v-if="resultData.product_attributes && !editingAttributes" text size="small" type="primary" @click="startEditAttributes">
+                        <el-icon><Edit /></el-icon> 补充/编辑属性
+                      </el-button>
+                    </div>
+                    <!-- 只读视图 -->
+                    <div class="attr-grid" v-if="resultData.product_attributes && !editingAttributes">
+                      <div class="attr-item" :class="{ 'attr-missing': !resultData.product_attributes.category }">
+                        <strong>品类：</strong>{{ resultData.product_attributes.category || '未识别' }}
+                        <el-tag v-if="!resultData.product_attributes.category" size="small" type="warning" style="margin-left:4px">缺失</el-tag>
+                      </div>
+                      <div class="attr-item" :class="{ 'attr-missing': !resultData.product_attributes.main_color }">
+                        <strong>主色调：</strong>{{ resultData.product_attributes.main_color || '未识别' }}
+                        <el-tag v-if="!resultData.product_attributes.main_color" size="small" type="warning" style="margin-left:4px">缺失</el-tag>
+                      </div>
+                      <div class="attr-item" :class="{ 'attr-missing': !(resultData.product_attributes.materials || []).length }">
+                        <strong>面料材质：</strong>{{ (resultData.product_attributes.materials || []).join(', ') || '未识别' }}
+                        <el-tag v-if="!(resultData.product_attributes.materials || []).length" size="small" type="warning" style="margin-left:4px">缺失</el-tag>
+                      </div>
+                      <div class="attr-item" :class="{ 'attr-missing': !(resultData.product_attributes.design_features || []).length }">
+                        <strong>版型设计：</strong>{{ (resultData.product_attributes.design_features || []).join(', ') || '未识别' }}
+                        <el-tag v-if="!(resultData.product_attributes.design_features || []).length" size="small" type="warning" style="margin-left:4px">缺失</el-tag>
+                      </div>
+                      <div class="attr-item" :class="{ 'attr-missing': !resultData.product_attributes.season }">
+                        <strong>适用季节：</strong>{{ resultData.product_attributes.season || '未识别' }}
+                        <el-tag v-if="!resultData.product_attributes.season" size="small" type="warning" style="margin-left:4px">缺失</el-tag>
+                      </div>
+                    </div>
+                    <!-- 编辑视图 -->
+                    <div v-if="editingAttributes" class="attr-edit-form">
+                      <div class="attr-edit-row">
+                        <label>品类</label>
+                        <el-input v-model="attrDraft.category" placeholder="如：连衣裙、T恤、运动鞋" size="small" />
+                      </div>
+                      <div class="attr-edit-row">
+                        <label>主色调</label>
+                        <el-input v-model="attrDraft.main_color" placeholder="如：黑色、白色、碎花" size="small" />
+                      </div>
+                      <div class="attr-edit-row">
+                        <label>面料材质</label>
+                        <el-input v-model="attrDraft.materialsStr" placeholder="多个用逗号分隔，如：聚酯纤维,氨纶" size="small" />
+                      </div>
+                      <div class="attr-edit-row">
+                        <label>版型设计</label>
+                        <el-input v-model="attrDraft.designFeaturesStr" placeholder="多个用逗号分隔，如：A字版型,方领,泡泡袖" size="small" />
+                      </div>
+                      <div class="attr-edit-row">
+                        <label>适用季节</label>
+                        <el-input v-model="attrDraft.season" placeholder="如：夏季、春秋、冬季" size="small" />
+                      </div>
+                      <div class="attr-edit-actions">
+                        <el-button size="small" @click="editingAttributes = false">取消</el-button>
+                        <el-button size="small" type="primary" @click="saveAttributes">保存修改</el-button>
+                      </div>
+                      <div class="attr-edit-hint">
+                        <el-icon color="#f59e0b"><WarningFilled /></el-icon>
+                        补充缺失属性有助于平台合规质检通过，提升 Listing 质量评分
+                      </div>
                     </div>
                   </div>
 
@@ -452,9 +671,11 @@
                         :key="idx" 
                         class="rule-row"
                       >
-                        <el-icon color="#22c55e"><CircleCheckFilled /></el-icon>
+                        <el-icon :color="r.status === 'PASS' ? '#22c55e' : (r.status === 'WARNING' || r.status === 'SKIPPED' ? '#f59e0b' : '#ef4444')">
+                          <component :is="r.status === 'PASS' ? 'CircleCheckFilled' : (r.status === 'WARNING' || r.status === 'SKIPPED' ? 'WarningFilled' : 'CircleCloseFilled')" />
+                        </el-icon>
                         <span class="rule-name">{{ r.rule_name }}:</span>
-                        <span class="rule-desc">{{ r.details }}</span>
+                        <span class="rule-desc">{{ r.details || '—' }}</span>
                       </div>
                     </div>
                   </div>
@@ -473,220 +694,73 @@
                     </div>
                   </div>
                 </div>
-              </el-tab-pane>
 
-              <!-- Tab 5: 选品决策评分 (V2) -->
-              <el-tab-pane name="opportunity">
-                <template #label>
-                  <span>选品决策评分 <el-tag v-if="resultData.opportunity_score" size="small" :type="resultData.opportunity_score.recommendation === '强烈推荐' ? 'success' : resultData.opportunity_score.recommendation === '谨慎观望' ? 'warning' : 'info'">{{ resultData.opportunity_score.total_score?.toFixed(1) }}</el-tag></span>
-                </template>
-                <div v-if="!resultData.opportunity_score" class="empty-state">
-                  <el-empty description="Agent 完成市场洞察后将自动生成六维选品评分" />
-                </div>
-                <div v-else class="opportunity-view">
-                  <div class="score-header">
-                    <div class="total-score-ring">
-                      <svg viewBox="0 0 120 120" class="score-ring-svg">
-                        <circle cx="60" cy="60" r="52" fill="none" stroke="var(--el-border-color-lighter)" stroke-width="8" />
-                        <circle cx="60" cy="60" r="52" fill="none"
-                          :stroke="resultData.opportunity_score.total_score >= 70 ? '#22c55e' : resultData.opportunity_score.total_score >= 50 ? '#f59e0b' : '#ef4444'"
-                          stroke-width="8" stroke-linecap="round"
-                          :stroke-dasharray="`${(resultData.opportunity_score.total_score / 100) * 327} 327`"
-                          transform="rotate(-90 60 60)" />
-                      </svg>
-                      <div class="score-ring-text">
-                        <span class="score-number">{{ resultData.opportunity_score.total_score?.toFixed(1) }}</span>
-                        <span class="score-label">综合评分</span>
+                <!-- 发布审核子区块 (Human-in-the-loop) -->
+                <div class="sub-section" v-if="resultData.publish_package">
+                  <div class="sub-section-label">发布审核 · 人工确认</div>
+                  <div class="publish-review-view">
+                    <div class="review-header">
+                      <el-descriptions :column="2" border size="small">
+                        <el-descriptions-item label="目标平台">{{ resultData.publish_package.platform }}</el-descriptions-item>
+                        <el-descriptions-item label="SKU">{{ resultData.publish_package.sku }}</el-descriptions-item>
+                        <el-descriptions-item label="审核状态">
+                          <el-tag :type="resultData.publish_package.review_decision === 'approved' ? 'success' : resultData.publish_package.review_decision === 'rejected' ? 'danger' : 'warning'" size="small">
+                            {{ resultData.publish_package.review_decision === 'approved' ? '审核通过' : resultData.publish_package.review_decision === 'rejected' ? '已驳回' : '待人工审核' }}
+                          </el-tag>
+                        </el-descriptions-item>
+                        <el-descriptions-item label="Listing 质量">
+                          <el-tag :type="resultData.publish_package.listing_health_grade === 'A' ? 'success' : resultData.publish_package.listing_health_grade === 'B' ? '' : 'warning'" size="small">
+                            {{ resultData.publish_package.listing_health_grade }} 级
+                          </el-tag>
+                        </el-descriptions-item>
+                      </el-descriptions>
+                    </div>
+
+                    <div class="review-checklist">
+                      <div class="block-label">合规质检清单</div>
+                      <div v-for="(item, idx) in resultData.publish_package.check_items" :key="idx" class="check-item">
+                        <el-icon :color="item.status === 'PASS' ? '#22c55e' : (item.status === 'WARNING' ? '#f59e0b' : '#ef4444')">
+                          <component :is="item.status === 'PASS' ? 'CircleCheckFilled' : (item.status === 'WARNING' ? 'WarningFilled' : 'CircleCloseFilled')" />
+                        </el-icon>
+                        <span class="check-name">{{ item.name }}</span>
+                        <span class="check-detail">{{ item.details || '—' }}</span>
                       </div>
                     </div>
-                    <div class="score-summary">
-                      <el-tag :type="resultData.opportunity_score.recommendation === '强烈推荐' ? 'success' : resultData.opportunity_score.recommendation === '谨慎观望' ? 'warning' : 'info'" size="large" effect="dark">
-                        {{ resultData.opportunity_score.recommendation }}
-                      </el-tag>
-                      <p class="recommendation-text">{{ resultData.opportunity_score.summary }}</p>
-                      <div class="platform-recs" v-if="resultData.opportunity_score.platform_recommendations?.length">
-                        <span class="rec-label">推荐平台：</span>
-                        <el-tag v-for="pr in resultData.opportunity_score.platform_recommendations" :key="pr.platform" size="small" effect="plain" class="rec-tag">
-                          {{ pr.platform }} ({{ pr.score?.toFixed(0) }})
-                        </el-tag>
+
+                    <div class="review-actions" v-if="resultData.publish_package.review_decision === 'needs_revision'">
+                      <el-divider />
+                      <div class="review-btn-row">
+                        <el-button type="success" size="large" @click="handlePublishDecision('approved')">
+                          <el-icon><CircleCheckFilled /></el-icon> 审核通过，执行发布
+                        </el-button>
+                        <el-button type="danger" size="large" @click="handlePublishDecision('rejected')">
+                          <el-icon><CircleCloseFilled /></el-icon> 驳回，需修改后重新提交
+                        </el-button>
                       </div>
                     </div>
-                  </div>
-                  <div class="dimension-bars">
-                    <div v-for="dim in resultData.opportunity_score.dimensions" :key="dim.name" class="dim-row">
-                      <span class="dim-name">{{ dim.name }}</span>
-                      <el-progress :percentage="dim.score" :color="dim.score >= 70 ? '#22c55e' : dim.score >= 50 ? '#f59e0b' : '#ef4444'" :stroke-width="14" :show-text="true" />
-                      <span class="dim-weight">权重 {{ (dim.weight * 100).toFixed(0) }}%</span>
+                    <div class="review-result" v-else>
+                      <el-divider />
+                      <el-alert
+                        :title="resultData.publish_package.review_decision === 'approved' ? '审核已通过，发布包已就绪' : '审核已驳回，请根据反馈修改后重新生成'"
+                        :type="resultData.publish_package.review_decision === 'approved' ? 'success' : 'error'"
+                        :description="resultData.publish_package.review_comment || ''"
+                        show-icon :closable="false"
+                      />
                     </div>
                   </div>
-                  <div class="supply-market-fit" v-if="resultData.opportunity_score.supply_market_fit">
-                    <div class="block-label">Supply-Market Fit 分析</div>
-                    <el-alert :title="resultData.opportunity_score.supply_market_fit.verdict" :type="resultData.opportunity_score.supply_market_fit.fit_score >= 70 ? 'success' : 'warning'" :description="resultData.opportunity_score.supply_market_fit.explanation" show-icon :closable="false" />
-                  </div>
                 </div>
-              </el-tab-pane>
 
-              <!-- Tab 6: 素材缺口分析 (V2) -->
-              <el-tab-pane name="asset_gap">
-                <template #label>
-                  <span>素材缺口 <el-tag v-if="resultData.asset_gap" size="small" :type="resultData.asset_gap.missing_count === 0 ? 'success' : 'warning'">{{ resultData.asset_gap.missing_count }} 项待补</el-tag></span>
-                </template>
-                <div v-if="!resultData.asset_gap && !resultData.asset_inventory" class="empty-state">
-                  <el-empty description="Agent 完成素材盘点后将展示现有素材与缺口分析" />
+                <div v-if="!resultData.platform_package && !resultData.publish_package" class="empty-state">
+                  <el-empty description="启动上新后此处将展示标准化发布包与人工审核流程" />
                 </div>
-                <div v-else class="asset-gap-view">
-                  <div class="inventory-summary" v-if="resultData.asset_inventory">
-                    <el-row :gutter="16">
-                      <el-col :span="8">
-                        <el-statistic title="已有素材" :value="resultData.asset_inventory.total_count || 0">
-                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> 项</span></template>
-                        </el-statistic>
-                      </el-col>
-                      <el-col :span="8">
-                        <el-statistic title="覆盖类型" :value="resultData.asset_inventory.covered_types?.length || 0">
-                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> / {{ resultData.asset_inventory.required_types?.length || 0 }} 类</span></template>
-                        </el-statistic>
-                      </el-col>
-                      <el-col :span="8">
-                        <el-statistic title="素材来源" :value="resultData.asset_inventory.ai_generated_count || 0">
-                          <template #suffix><span style="font-size:13px;color:var(--el-text-color-secondary)"> AI 生成</span></template>
-                        </el-statistic>
-                      </el-col>
-                    </el-row>
-                  </div>
+                </el-card>
+              </div>
 
-                  <div class="gap-list" v-if="resultData.asset_gap?.items?.length">
-                    <div class="block-label">缺口清单 (仅生成缺失项，搬运优先)</div>
-                    <div v-for="(gap, idx) in resultData.asset_gap.items" :key="idx" class="gap-item">
-                      <div class="gap-item-header">
-                        <el-tag :type="gap.priority === 'high' ? 'danger' : gap.priority === 'medium' ? 'warning' : 'info'" size="small">{{ gap.priority === 'high' ? '必需' : gap.priority === 'medium' ? '建议' : '可选' }}</el-tag>
-                        <span class="gap-asset-type">{{ gap.asset_type }}</span>
-                        <span class="gap-status" :class="gap.status">{{ gap.status === 'missing' ? '缺失' : gap.status === 'generated' ? '已 AI 补全' : '已搬运' }}</span>
-                      </div>
-                      <p class="gap-reason" v-if="gap.reason">{{ gap.reason }}</p>
-                      <div class="gap-cost" v-if="gap.estimated_cost">
-                        <el-tag size="small" type="info" effect="plain">预估成本: {{ gap.estimated_cost }}</el-tag>
-                      </div>
-                    </div>
-                  </div>
-                  <el-empty v-else-if="resultData.asset_gap" description="所有必需素材已齐备，无缺口" :image-size="60" />
-                </div>
-              </el-tab-pane>
-
-              <!-- Tab 7: Listing 质量评分 (V2) -->
-              <el-tab-pane name="listing_health">
-                <template #label>
-                  <span>Listing 质量 <el-tag v-if="resultData.listing_health" size="small" :type="resultData.listing_health.grade === 'A' ? 'success' : resultData.listing_health.grade === 'B' ? '' : 'warning'">{{ resultData.listing_health.grade }} 级</el-tag></span>
-                </template>
-                <div v-if="!resultData.listing_health" class="empty-state">
-                  <el-empty description="Listing 撰写完成后将自动进行八维质量评估" />
-                </div>
-                <div v-else class="health-view">
-                  <div class="health-header">
-                    <div class="grade-badge" :class="'grade-' + resultData.listing_health.grade">
-                      {{ resultData.listing_health.grade }}
-                    </div>
-                    <div class="health-meta">
-                      <span class="health-total">综合评分 <strong>{{ resultData.listing_health.total_score?.toFixed(1) }}</strong> / 100</span>
-                      <span class="health-grade-text">{{ resultData.listing_health.grade_description }}</span>
-                    </div>
-                  </div>
-                  <div class="health-dim-grid">
-                    <div v-for="dim in resultData.listing_health.dimensions" :key="dim.name" class="health-dim-card">
-                      <div class="dim-card-header">
-                        <span class="dim-card-name">{{ dim.name }}</span>
-                        <span class="dim-card-score" :style="{ color: dim.score >= 80 ? '#22c55e' : dim.score >= 60 ? '#f59e0b' : '#ef4444' }">{{ dim.score?.toFixed(0) }}</span>
-                      </div>
-                      <el-progress :percentage="dim.score" :show-text="false" :color="dim.score >= 80 ? '#22c55e' : dim.score >= 60 ? '#f59e0b' : '#ef4444'" :stroke-width="6" />
-                      <p class="dim-card-feedback" v-if="dim.feedback">{{ dim.feedback }}</p>
-                    </div>
-                  </div>
-                  <div class="improvement-priorities" v-if="resultData.listing_health.improvement_priorities?.length">
-                    <div class="block-label">改进建议</div>
-                    <el-timeline>
-                      <el-timeline-item v-for="(imp, idx) in resultData.listing_health.improvement_priorities" :key="idx" :type="idx === 0 ? 'danger' : idx === 1 ? 'warning' : 'info'" :timestamp="'优先级 #' + (idx + 1)">
-                        {{ imp }}
-                      </el-timeline-item>
-                    </el-timeline>
-                  </div>
-                </div>
-              </el-tab-pane>
-
-              <!-- Tab 8: 发布审核 (V2 Human-in-the-loop) -->
-              <el-tab-pane name="publish_review">
-                <template #label>
-                  <span>发布审核 <el-tag v-if="resultData.publish_package" size="small" :type="resultData.publish_package.decision === 'approved' ? 'success' : resultData.publish_package.decision === 'rejected' ? 'danger' : 'warning'">{{ resultData.publish_package.decision === 'approved' ? '已通过' : resultData.publish_package.decision === 'rejected' ? '已驳回' : '待审核' }}</el-tag></span>
-                </template>
-                <div v-if="!resultData.publish_package" class="empty-state">
-                  <el-empty description="合规质检完成后将生成发布审核包，等待人工确认" />
-                </div>
-                <div v-else class="publish-review-view">
-                  <div class="review-header">
-                    <el-descriptions :column="2" border size="small">
-                      <el-descriptions-item label="目标平台">{{ resultData.publish_package.platform }}</el-descriptions-item>
-                      <el-descriptions-item label="SKU">{{ resultData.publish_package.sku }}</el-descriptions-item>
-                      <el-descriptions-item label="审核状态">
-                        <el-tag :type="resultData.publish_package.decision === 'approved' ? 'success' : resultData.publish_package.decision === 'rejected' ? 'danger' : 'warning'" size="small">
-                          {{ resultData.publish_package.decision === 'approved' ? '审核通过' : resultData.publish_package.decision === 'rejected' ? '已驳回' : '待人工审核' }}
-                        </el-tag>
-                      </el-descriptions-item>
-                      <el-descriptions-item label="Listing 质量">
-                        <el-tag :type="resultData.publish_package.listing_health_grade === 'A' ? 'success' : resultData.publish_package.listing_health_grade === 'B' ? '' : 'warning'" size="small">
-                          {{ resultData.publish_package.listing_health_grade }} 级
-                        </el-tag>
-                      </el-descriptions-item>
-                    </el-descriptions>
-                  </div>
-
-                  <div class="review-checklist">
-                    <div class="block-label">合规质检清单</div>
-                    <div v-for="(item, idx) in resultData.publish_package.check_items" :key="idx" class="check-item">
-                      <el-icon :color="item.passed ? '#22c55e' : '#ef4444'">
-                        <component :is="item.passed ? 'CircleCheckFilled' : 'CircleCloseFilled'" />
-                      </el-icon>
-                      <span class="check-name">{{ item.name }}</span>
-                      <span class="check-detail">{{ item.detail }}</span>
-                    </div>
-                  </div>
-
-                  <div class="review-actions" v-if="resultData.publish_package.decision === 'pending'">
-                    <el-divider />
-                    <div class="review-btn-row">
-                      <el-button type="success" size="large" @click="handlePublishDecision('approved')">
-                        <el-icon><CircleCheckFilled /></el-icon> 审核通过，执行发布
-                      </el-button>
-                      <el-button type="danger" size="large" @click="handlePublishDecision('rejected')">
-                        <el-icon><CircleCloseFilled /></el-icon> 驳回，需修改后重新提交
-                      </el-button>
-                    </div>
-                  </div>
-                  <div class="review-result" v-else>
-                    <el-divider />
-                    <el-alert
-                      :title="resultData.publish_package.decision === 'approved' ? '审核已通过，发布包已就绪' : '审核已驳回，请根据反馈修改后重新生成'"
-                      :type="resultData.publish_package.decision === 'approved' ? 'success' : 'error'"
-                      :description="resultData.publish_package.review_comment || ''"
-                      show-icon :closable="false"
-                    />
-                  </div>
-                </div>
-              </el-tab-pane>
-            </el-tabs>
-          </el-card>
-        </div>
+          </div><!-- /sections-container -->
+        </div><!-- /right-panel -->
       </div>
     </main>
     </div>
-
-    <!-- 工作流和技能 hub -->
-    <WorkflowHub
-      v-if="activeView === 'hub'"
-      :disabled-stages="disabledStages"
-      @toggle-stage="toggleStage"
-      @use-workflow="useWorkflow"
-    />
-    <TaskManager v-else-if="activeView === 'tasks'" @view-task="handleViewTask" />
-    <Connections v-else-if="activeView === 'connections'" />
     </div>
 
     <!-- 1688 商品导入弹窗 -->
@@ -863,24 +937,32 @@
         </div>
       </div>
     </el-drawer>
+
+    <!-- 通用图片放大预览 -->
+    <el-dialog v-model="previewImageVisible" :title="previewTitle" width="fit-content" align-center>
+      <img :src="previewImageUrl" alt="预览" class="preview-full-img" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import AgentGraph from './components/AgentGraph.vue'
 import AppSidebar from './components/AppSidebar.vue'
-import WorkflowHub from './components/WorkflowHub.vue'
-import TaskManager from './components/TaskManager.vue'
-import Connections from './components/Connections.vue'
 
-// 顶层视图切换（牛顿风格侧边栏导航）
-const activeView = ref('workbench')
-// 执行拓扑图折叠开关（小屏收起后可单屏完整查看工作台）
-const showGraph = ref(true)
+// 顶层视图切换（侧边栏导航 → 滚动到对应区块）
+const activeView = ref('new_product')
+// 执行拓扑图已迁移至侧边栏，保留变量供侧边栏使用
 // hub 技能开关关闭的可选节点（传入后端跳过对应节点）
 const disabledStages = ref([])
+
+// 区块 ref（用于侧边栏点击滚动定位）
+const sectionNewProduct = ref(null)
+const sectionResearch = ref(null)
+const sectionLaunchPlan = ref(null)
+const sectionStudio = ref(null)
+const sectionListing = ref(null)
+const sectionPublish = ref(null)
 
 const isRunning = ref(false)
 const runningNode = ref(null)
@@ -890,7 +972,7 @@ const plannedStages = ref([])
 const etaSeconds = ref(0)
 const nodeDurations = ref({})
 const traceLogs = ref([])
-const activeTab = ref('listing')
+const activeTab = ref('listing') // 保留兼容，但不再用于主导航
 const lastThreadId = ref(null)
 const lastError = ref('')
 
@@ -906,7 +988,7 @@ const importRecommend = ref({ platform: 'Amazon', market: 'US' })
 
 // 根据商品标题智能推荐目标平台与站点（家居厨房偏好东南亚走量，其余默认 Amazon 美区）
 function pickRecommendedTarget(title) {
-  const t = (title || '').toLowerCase()
+  const t = String(title || '').toLowerCase()
   if (/收纳|厨房|家居|家纺|置物|餐具|水杯|保温杯|四件套|窗帘|地毯/.test(t)) {
     return { platform: 'Shopee', market: 'Southeast Asia' }
   }
@@ -925,11 +1007,18 @@ const publishResultVisible = ref(false)
 const tryonLoading = ref(false)
 const tryonResult = ref(null)
 
+// 带货视频（占位保留，按需生成）
+const videoLoading = ref(false)
+const videoResult = ref(null)
+
 // AI 场景图按需补充（搬运原素材模式下手动触发）
 const scenesLoading = ref(false)
 
 // 批量上新相关状态
 const batchDialogVisible = ref(false)
+const previewImageVisible = ref(false)
+const previewImageUrl = ref('')
+const previewTitle = ref('图片预览')
 const batchItems = ref([])
 const batchResults = ref([])
 const batchRunning = ref(false)
@@ -943,13 +1032,44 @@ const versionSelected = ref([])
 const compareResult = ref(null)
 const compareLoading = ref(false)
 
+// 属性编辑相关状态
+const editingAttributes = ref(false)
+const attrDraft = reactive({
+  category: '',
+  main_color: '',
+  materialsStr: '',
+  designFeaturesStr: '',
+  season: '',
+})
+
+function startEditAttributes() {
+  const attrs = resultData.product_attributes || {}
+  attrDraft.category = attrs.category || ''
+  attrDraft.main_color = attrs.main_color || ''
+  attrDraft.materialsStr = (attrs.materials || []).join(', ')
+  attrDraft.designFeaturesStr = (attrs.design_features || []).join(', ')
+  attrDraft.season = attrs.season || ''
+  editingAttributes.value = true
+}
+
+function saveAttributes() {
+  if (!resultData.product_attributes) return
+  resultData.product_attributes.category = attrDraft.category.trim()
+  resultData.product_attributes.main_color = attrDraft.main_color.trim()
+  resultData.product_attributes.materials = attrDraft.materialsStr.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+  resultData.product_attributes.design_features = attrDraft.designFeaturesStr.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+  resultData.product_attributes.season = attrDraft.season.trim()
+  editingAttributes.value = false
+  ElMessage.success('属性已更新，平台质检将基于最新数据')
+}
+
 const form = reactive({
   intent: 'full_launch',
   target_platform: 'Amazon',
   target_market: 'US',
-  product_image_url: 'https://img.alicdn.com/imgextra/i1/6000000007892/O1CN01a2ZpQM1scXS5sBsAa_!!6000000007892-0-tps-400-400.jpg',
+  product_image_url: '',
   imported_images: [],
-  message: '帮我将这款夏季法式复古方领碎花连衣裙做全链路上新，目标市场为 Amazon US。'
+  message: ''
 })
 
 const resultData = reactive({
@@ -975,9 +1095,9 @@ const VIDEO_MODE_INFO = {
   storyboard_only: { label: '分镜脚本已就绪', tag: 'info' }
 }
 const videoModeLabel = computed(() =>
-  VIDEO_MODE_INFO[resultData.video_package?.mode]?.label || '待生成')
+  VIDEO_MODE_INFO[videoResult.value?.mode]?.label || '待生成')
 const videoModeTagType = computed(() =>
-  VIDEO_MODE_INFO[resultData.video_package?.mode]?.tag || 'info')
+  VIDEO_MODE_INFO[videoResult.value?.mode]?.tag || 'info')
 const isApparel = computed(() =>
   resultData.product_attributes?.category_family === 'apparel')
 
@@ -990,7 +1110,7 @@ function handlePresetSelect(command) {
   } else if (command === 'linen_shirt') {
     form.target_platform = 'Shopee'
     form.target_market = 'Southeast Asia'
-    form.product_image_url = 'https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=600&auto=format&fit=crop&q=80'
+    form.product_image_url = 'https://img.alicdn.com/imgextra/i2/6000000005645/O1CN01JHgOqE1c5MKHI3RlN_!!6000000005645-0-tps-800-800.jpg'
     form.message = '为这款极简透气亚麻休闲长袖衬衫生成 Shopee 东南亚站点的选品分析与双语 Listing。'
   }
 }
@@ -1018,13 +1138,14 @@ function resetAll() {
   resultData.listing_health = null
   resultData.publish_package = null
   tryonResult.value = null
+  videoResult.value = null
 }
 
 async function runPipeline({ resume = false } = {}) {
   isRunning.value = true
   if (!resume) {
     lastError.value = ''
-    ElMessage.info('LangGraph 智能体引擎启动，正在编排执行流水线...')
+    ElMessage.info('AI 引擎启动，正在编排执行流水线...')
   } else {
     ElMessage.info('从检查点断点继续执行...')
   }
@@ -1186,20 +1307,41 @@ async function importAndLaunch() {
   await runPipeline()
 }
 
-// 侧边栏视图切换
-function switchView(view) {
-  activeView.value = view
+// 侧边栏导航 → 滚动到对应区块
+// 通用图片预览：设置 URL 和标题后打开对话框
+function openImagePreview(url, title = '图片预览') {
+  previewImageUrl.value = url
+  previewTitle.value = title
+  previewImageVisible.value = true
 }
 
-// hub「使用」按钮：预置意图并回到工作台（批量工作流直接打开 CSV 弹窗）
+function switchView(view) {
+  activeView.value = view
+  const sectionMap = {
+    'new_product': sectionNewProduct,
+    'research': sectionResearch,
+    'launch_plan': sectionLaunchPlan,
+    'studio': sectionStudio,
+    'listing': sectionListing,
+    'publish': sectionPublish,
+  }
+  const target = sectionMap[view]
+  if (target?.value) {
+    nextTick(() => {
+      target.value.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+}
+
+// hub「使用」按钮：预置意图并回到上新页
 function useWorkflow(id) {
   if (id === 'batch') {
-    activeView.value = 'workbench'
+    activeView.value = 'new_product'
     batchDialogVisible.value = true
     return
   }
   form.intent = id
-  activeView.value = 'workbench'
+  activeView.value = 'new_product'
   ElMessage.success(id === 'market_only'
     ? '已切换为「市场洞察速览」工作流，填入商品后启动'
     : '已切换为「全链路智能上新」工作流，填入商品或粘贴 1688 链接后启动')
@@ -1418,6 +1560,40 @@ async function generateTryon() {
     ElMessage.error('虚拟试穿服务请求失败: ' + e.message)
   } finally {
     tryonLoading.value = false
+  }
+}
+
+// ---------- 带货视频（占位保留，按需生成） ----------
+async function generateVideo() {
+  const listing = resultData.listing_content || {}
+  if (!listing.title) {
+    ElMessage.warning('缺少 Listing 数据，请先完成上新流程')
+    return
+  }
+  videoLoading.value = true
+  try {
+    const resp = await fetch('/api/products/studio/video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: listing.title,
+        bullet_points: listing.bullet_points || [],
+        category: resultData.product_attributes?.category || '商品',
+        platform: form.target_platform || 'TikTok',
+        market: form.target_market || 'US'
+      })
+    })
+    const data = await resp.json()
+    if (resp.ok && data.video_package) {
+      videoResult.value = data.video_package
+      ElMessage.success('带货视频分镜脚本已生成')
+    } else {
+      ElMessage.error(data.detail || '视频生成失败')
+    }
+  } catch (e) {
+    ElMessage.error('视频服务请求失败: ' + e.message)
+  } finally {
+    videoLoading.value = false
   }
 }
 
@@ -1661,6 +1837,36 @@ body {
   gap: 16px;
 }
 
+.eta-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  flex-shrink: 0;
+}
+.eta-indicator.done {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.eta-text {
+  font-size: 12px;
+  color: var(--gl-text-mid);
+  white-space: nowrap;
+}
+.eta-text strong {
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+.eta-indicator.done .eta-text {
+  color: #22c55e;
+}
+.eta-indicator.done .eta-text strong {
+  color: #22c55e;
+}
+
 .main-content {
   flex: 1;
   min-height: 0;
@@ -1669,10 +1875,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-.graph-section {
-  width: 100%;
 }
 
 .workspace-grid {
@@ -1727,26 +1929,69 @@ body {
   flex-direction: column;
 }
 
-.results-card :deep(.el-tabs) {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.results-card :deep(.el-tabs__header) {
-  flex-shrink: 0;
-  margin-bottom: 10px;
-}
-
-.results-card :deep(.el-tabs__content) {
+/* ═══ Section-based layout styles ═══ */
+.sections-container {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-right: 4px;
 }
 
-.results-card :deep(.el-tab-pane) {
-  height: 100%;
-  overflow-y: auto;
+.result-section {
+  flex-shrink: 0;
+}
+
+.section-card {
+  background: var(--gl-panel) !important;
+  border: 1px solid var(--gl-border) !important;
+  border-radius: 12px !important;
+  color: var(--gl-text) !important;
+}
+
+.section-card :deep(.el-card__body) {
+  padding: 16px 20px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--gl-border);
+}
+
+.section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--gl-text-hi);
+  margin: 0;
+}
+
+.sub-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--gl-border);
+}
+
+.sub-section-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gl-text-hi2);
+  margin-bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-state {
+  padding: 20px 0;
 }
 
 .card-title {
@@ -1775,11 +2020,16 @@ body {
 .image-thumb-box {
   position: relative;
   width: 100%;
-  height: 100px;
+  height: 120px;
   border-radius: 8px;
   overflow: hidden;
   margin-bottom: 16px;
   border: 1px solid var(--gl-border-2);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.image-thumb-box:hover {
+  border-color: #38bdf8;
 }
 
 .thumb-img {
@@ -1797,16 +2047,16 @@ body {
   color: #38bdf8;
   padding: 2px 8px;
   border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
-.custom-tabs .el-tabs__item {
-  color: var(--gl-sub) !important;
-  font-size: 14px;
-}
-
-.custom-tabs .el-tabs__item.is-active {
-  color: #38bdf8 !important;
-  font-weight: 600;
+.preview-full-img {
+  max-width: 520px;
+  max-height: 70vh;
+  display: block;
+  border-radius: 8px;
 }
 
 .result-block {
@@ -1928,6 +2178,11 @@ body {
   background: var(--gl-panel-deep);
   padding: 12px;
   border-radius: 8px;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.tryon-banner:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px var(--gl-shadow);
 }
 
 .tryon-img {
@@ -1935,6 +2190,10 @@ body {
   height: 180px;
   object-fit: cover;
   border-radius: 6px;
+  transition: filter 0.2s;
+}
+.tryon-banner:hover .tryon-img {
+  filter: brightness(1.05);
 }
 
 .tryon-details {
@@ -2017,12 +2276,21 @@ body {
   background: var(--gl-panel-deep);
   border-radius: 6px;
   overflow: hidden;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.scene-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px var(--gl-shadow);
 }
 
 .scene-img {
   width: 100%;
   height: 120px;
   object-fit: cover;
+  transition: filter 0.2s;
+}
+.scene-card:hover .scene-img {
+  filter: brightness(1.05);
 }
 
 .scene-caption {
@@ -2038,6 +2306,52 @@ body {
   gap: 10px;
   font-size: 13px;
   color: var(--gl-text-mid);
+}
+.attr-item.attr-missing {
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 4px;
+  padding: 2px 6px;
+  border: 1px dashed rgba(245, 158, 11, 0.3);
+}
+
+.attr-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--gl-panel-deep);
+  border-radius: 8px;
+  border: 1px solid var(--gl-hover-border);
+}
+.attr-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.attr-edit-row label {
+  width: 72px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--gl-text-mid);
+  text-align: right;
+}
+.attr-edit-row .el-input {
+  flex: 1;
+}
+.attr-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.attr-edit-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gl-sub);
+  padding-top: 4px;
+  border-top: 1px solid var(--gl-border);
 }
 
 .rules-list {
@@ -2540,7 +2854,7 @@ body {
   border-radius: 8px;
   padding: 12px;
   font-size: 13px;
-  color: #fde68a;
+  color: var(--gl-formula-text);
   line-height: 1.6;
 }
 
@@ -2566,6 +2880,10 @@ body {
   flex: 1;
   min-width: 0;
   text-align: center;
+  transition: transform 0.2s;
+}
+.localize-col:hover {
+  transform: scale(1.02);
 }
 
 .localize-img {
@@ -2574,6 +2892,10 @@ body {
   object-fit: cover;
   border-radius: 6px;
   border: 1px solid var(--gl-border-2);
+  transition: border-color 0.2s;
+}
+.localize-col:hover .localize-img {
+  border-color: #38bdf8;
 }
 
 .localize-cap {

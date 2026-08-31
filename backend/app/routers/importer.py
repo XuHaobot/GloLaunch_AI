@@ -1,9 +1,11 @@
 """商品导入：解析 1688 商品链接，提取标题/主图/属性，预填充上新表单。
 
-双通道策略：
-1. 官方 API 优先：配置了 1688 开放平台凭证（AppKey/AppSecret/access_token）时，
+三通道降级策略：
+1. JustOneAPI 优先：配置 JUSTONEAPI_API_KEY 即可用，第三方聚合接口稳定不受反爬影响，
+   返回完整的结构化数据（标题、图片、SKU、价格、产品参数等）
+2. 官方 API 次之：配置了 1688 开放平台凭证（AppKey/AppSecret/access_token）时，
    调用 com.alibaba.product.getProductInfo 稳定获取结构化商品信息（HMAC-SHA1 签名）
-2. 页面抓取兜底：未配置凭证或官方调用失败时，尽力而为（best-effort）解析详情页：
+3. 页面抓取兜底：未配置凭证或上述调用失败时，尽力而为（best-effort）解析详情页：
    优先从页面内嵌的全局数据对象（如 window.__INIT_DATA / detailData）中抽取结构化字段，
    失败时返回明确提示，引导用户手动填写。
 """
@@ -142,6 +144,101 @@ async def _import_via_open_api(url: str) -> Dict[str, Any]:
         },
     }
 
+async def _import_via_justoneapi(url: str) -> Dict[str, Any]:
+    """JustOneAPI 第三方接口通道：GET /api/1688/get-item-detail/v1，返回与其他通道一致的 product 结构"""
+    settings = get_settings()
+    if not settings.justoneapi_api_key:
+        raise RuntimeError("JustOneAPI 未配置")
+
+    offer_id = _extract_offer_id(url)
+    if not offer_id:
+        raise ValueError("无法从链接中解析出商品 ID")
+
+    api_url = f"{settings.justoneapi_base_url}/api/1688/get-item-detail/v1"
+    params = {"token": settings.justoneapi_api_key, "itemId": offer_id}
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.get(api_url, params=params)
+        resp.raise_for_status()
+        body = resp.json()
+
+    code = body.get("code", -1)
+    if code != 0:
+        raise RuntimeError(f"JustOneAPI 返回错误码 {code}: {body.get('message', '')}")
+
+    data = body.get("data")
+    if not data:
+        raise RuntimeError("JustOneAPI 返回空数据")
+
+    # data 可能是 JSON 字符串
+    if isinstance(data, str):
+        data = json.loads(data)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"JustOneAPI data 类型异常: {type(data).__name__}")
+
+    # -- 标题 (data.item.offerTitle) --
+    item = data.get("item") or {}
+    raw_title = item.get("offerTitle", "") or ""
+    title = str(raw_title).strip()
+
+    # -- 图片: mainPic.offerImgList -> mainPic.offerImages -> images 降级 --
+    images: List[str] = []
+    main_pic = data.get("mainPic") or {}
+    img_list = main_pic.get("offerImgList") or []
+    images = [_normalize_image_url(u) for u in img_list if isinstance(u, str)]
+    if not images:
+        img_objs = main_pic.get("offerImages") or []
+        for obj in img_objs:
+            u = obj.get("imgUrl", "") if isinstance(obj, dict) else ""
+            if u:
+                images.append(_normalize_image_url(u))
+    if not images:
+        for obj in (data.get("images") or []):
+            if isinstance(obj, dict):
+                u = obj.get("imageURI") or obj.get("size220x220ImageURI") or ""
+            else:
+                u = str(obj) if obj else ""
+            if u:
+                images.append(_normalize_image_url(u))
+            if len(images) >= 8:
+                break
+
+    # -- 价格: item.price -> price.priceModel.currentPrices --
+    price = None
+    raw_price = item.get("price")
+    if raw_price:
+        price = f"\u00a5{raw_price}"
+    else:
+        price_info = data.get("price") or {}
+        model = (price_info.get("priceModel") or {})
+        tiers = model.get("currentPrices") or []
+        if tiers and tiers[0].get("price"):
+            price = f"\u00a5{tiers[0]['price']}"
+
+    # -- SKU/产品属性: attribute.propsList [{name, value}] --
+    sku_attributes: Dict[str, List[str]] = {}
+    attr = data.get("attribute") or {}
+    for prop in (attr.get("propsList") or []):
+        name = prop.get("name", "")
+        value = prop.get("value", "")
+        if name and value:
+            vals = [v.strip() for v in value.split(",") if v.strip()]
+            sku_attributes[name] = vals
+    sku_attributes = dict(list(sku_attributes.items())[:8])
+
+    return {
+        "success": True,
+        "message": "JustOneAPI 解析成功",
+        "product": {
+            "title": title,
+            "main_image": images[0] if images else None,
+            "images": images,
+            "source_price": price,
+            "sku_attributes": sku_attributes,
+            "source_url": url,
+        },
+    }
+
 def _extract_title(html: str) -> Optional[str]:
     # 页面标题通常形如 "xxx-批发价格-厂家货源 -阿里巴巴"
     m = re.search(r"<title>(.*?)</title>", html, re.S)
@@ -256,7 +353,7 @@ async def oauth_callback(code: str = "", error: str = ""):
 
 @router.post("/1688")
 async def import_from_1688(req: ImportRequest):
-    """解析 1688 商品链接：官方 API 优先，未配置/失败时降级页面抓取"""
+    """解析 1688 商品链接：JustOneAPI → 官方 API → 页面抓取，三级降级"""
     url = req.url.strip()
     if "1688.com" not in url and "alibaba" not in url:
         return {
@@ -264,26 +361,36 @@ async def import_from_1688(req: ImportRequest):
             "message": "仅支持 1688 商品链接（如 https://detail.1688.com/offer/xxx.html）",
         }
 
-    # 通道一：官方 API（凭证齐全时优先，稳定不受反爬影响；token 可来自 .env 或 OAuth 本地保存）
     settings = get_settings()
+
+    # 通道一：JustOneAPI 第三方接口（配置 token 即可用，稳定不受反爬影响）
+    justone_error = None
+    if settings.justoneapi_api_key:
+        try:
+            return await _import_via_justoneapi(url)
+        except Exception as e:
+            justone_error = str(e)
+
+    # 通道二：官方 API（凭证齐全时优先，稳定不受反爬影响；token 可来自 .env 或 OAuth 本地保存）
     api_error = None
     if settings.ali1688_app_key and settings.ali1688_app_secret and _resolve_access_token():
         try:
             return await _import_via_open_api(url)
         except Exception as e:
-            # 官方通道失败（权限不足/凭证过期/商品下架等），记录错误码用于降级提示
             api_error = str(e)
 
-    # 通道二：页面抓取兜底（未配置凭证或官方调用失败时）
+    # 通道三：页面抓取兜底（未配置凭证或上述调用失败时）
     try:
         async with httpx.AsyncClient(headers=BROWSER_HEADERS, follow_redirects=True, timeout=12.0) as client:
             resp = await client.get(url)
             html = resp.text
     except httpx.HTTPError as e:
         msg = f"抓取失败（{type(e).__name__}），1688 可能触发了反爬验证。"
+        if justone_error:
+            msg += f" JustOneAPI 返回错误：{justone_error}。"
         if api_error:
-            msg += f" 官方 API 亦返回错误：{api_error}"
-        msg += " 请在浏览器打开链接后手动复制标题与主图链接，或稍后接入 1688 开放平台官方 API。"
+            msg += f" 官方 API 亦返回错误：{api_error}。"
+        msg += " 请在浏览器打开链接后手动复制标题与主图链接。"
         return {"success": False, "message": msg}
 
     title = _extract_title(html)
@@ -293,21 +400,22 @@ async def import_from_1688(req: ImportRequest):
     # 判定是否被反爬拦截（页面没有商品图基本可确认）
     if not images and not title:
         msg = "页面被反爬拦截或未渲染完成。"
+        if justone_error:
+            msg += f" JustOneAPI 返回错误：{justone_error}。"
         if api_error:
-            msg += (
-                f" 官方 API 返回错误：{api_error}"
-                "（错误码通常提示缺少对应权限包，如商品详情接口需订购「跨境综合解决方案（自用）」）。"
-            )
-        msg += " 可配置 1688 开放平台凭证启用官方 API 稳定导入，或手动粘贴商品标题与主图链接继续上新。"
+            msg += f" 官方 API 返回错误：{api_error}。"
+        msg += " 可配置 JUSTONEAPI_API_KEY 或 1688 开放平台凭证启用稳定导入，或手动粘贴商品标题与主图链接继续上新。"
         return {"success": False, "message": msg}
 
-    # 官方 API 失败但页面抓取成功：保留错误码提醒（步骤七的 ⚠️ 降级分支）
+    # 高层通道失败但页面抓取成功：保留错误提醒
     message = "解析成功" if images else "部分解析成功（未抓到主图，请手动补充）"
+    errors = []
+    if justone_error:
+        errors.append(f"JustOneAPI: {justone_error}")
     if api_error:
-        message += (
-            f"；⚠️ 官方 API 返回错误：{api_error}"
-            "（若提示权限不足，多半需订购对应权限包，把错误码发我即可判断）"
-        )
+        errors.append(f"官方 API: {api_error}")
+    if errors:
+        message += f"；⚠️ 降级至页面抓取（{'；'.join(errors)}）"
     return {
         "success": True,
         "message": message,

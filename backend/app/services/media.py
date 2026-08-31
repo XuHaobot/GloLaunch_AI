@@ -59,49 +59,47 @@ def generate_image(prompt: str, size: str = "1024*1024") -> Optional[str]:
 
 def edit_image_async(prompt: str, image_url: str, size: str = "1024*1024",
                      poll_interval: float = 3.0, timeout_seconds: float = 240.0) -> Optional[str]:
-    """异步图片编辑（DashScope 原生格式）：提交任务 → 轮询 /v1/tasks/{task_id} → 返回结果图 URL。
-    用于真实虚拟试穿合成（服装图 + 提示词 → 模特上身图）。失败返回 None。
+    """图片编辑/图生图重绘（Token Plan multimodal-generation 同步接口）。
+    支持公网 URL 和 Base64 Data URI，直接返回生成的图片 URL。失败返回 None。
     """
     settings = get_settings()
     if not settings.model_router_api_key or not image_url:
         return None
-    base_url = settings.model_router_base_url.rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {settings.model_router_api_key}",
-        "Content-Type": "application/json",
-        "X-DashScope-Async": "enable",
-    }
+    
+    # 若为本地文件路径（/uploads/ 或本地绝对路径），转换为 base64 data URI
+    actual_image = image_url
+    if not image_url.startswith(("http://", "https://", "data:")):
+        from app.agent.nodes.product import _local_image_to_data_uri
+        actual_image = _local_image_to_data_uri(image_url) or image_url
+
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=180) as client:
             resp = client.post(
-                f"{base_url}/images/generations",
-                headers=headers,
+                f"{_gateway_root()}/api/v1/services/aigc/multimodal-generation/generation",
+                headers={
+                    "Authorization": f"Bearer {settings.model_router_api_key}",
+                    "Content-Type": "application/json",
+                },
                 json={
                     "model": settings.model_image_edit,
-                    "input": {"prompt": prompt, "images": [image_url]},
+                    "input": {
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"image": actual_image},
+                                {"text": prompt}
+                            ]
+                        }]
+                    },
                     "parameters": {"size": size},
                 },
             )
             resp.raise_for_status()
-            payload = resp.json()
-            task_id = payload.get("task_id") or (payload.get("output") or {}).get("task_id")
-            if not task_id:
-                return None
-
-            deadline = time.time() + timeout_seconds
-            while time.time() < deadline:
-                time.sleep(poll_interval)
-                task_resp = client.get(
-                    f"{base_url}/tasks/{task_id}",
-                    headers={"Authorization": headers["Authorization"]},
-                )
-                task_resp.raise_for_status()
-                task_data = task_resp.json()
-                status = (task_data.get("output") or {}).get("task_status") or task_data.get("status", "")
-                if status in ("SUCCEEDED", "SUCCESS"):
-                    return _extract_task_image_url(task_data)
-                if status in ("FAILED", "UNKNOWN", "CANCELED"):
-                    return None
+            choices = (resp.json().get("output") or {}).get("choices") or []
+            for ch in choices:
+                for part in (ch.get("message") or {}).get("content") or []:
+                    if isinstance(part, dict) and part.get("image"):
+                        return part["image"]
             return None
     except Exception:
         return None

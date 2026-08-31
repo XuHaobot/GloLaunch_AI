@@ -5,6 +5,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.agent.nodes.studio import run_virtual_tryon, run_scene_generation
+from app.agent.nodes.video import run_video_storyboard
 from app.config import get_settings
 from app.services.vector_store import KnowledgeStore
 
@@ -27,6 +28,13 @@ class SceneGenRequest(BaseModel):
     style_tags: List[str] = []
     design_features: List[str] = []
     product_image_url: str = ""
+
+class VideoGenRequest(BaseModel):
+    title: str
+    bullet_points: List[str] = []
+    category: str = "商品"
+    platform: str = "TikTok"
+    market: str = "US"
 
 @router.post("/knowledge/search")
 async def search_knowledge(req: KnowledgeQuery):
@@ -72,6 +80,20 @@ async def generate_scenes(req: SceneGenRequest):
     )
     return {"status": "success", "studio_assets": assets}
 
+@router.post("/studio/video")
+async def generate_video(req: VideoGenRequest):
+    """按需增值服务：带货视频分镜脚本生成（占位保留，按需触发，不在主流水线内）"""
+    if not req.title.strip():
+        raise HTTPException(status_code=400, detail="缺少商品标题")
+    result = await run_video_storyboard(
+        title=req.title.strip(),
+        bullet_points=req.bullet_points,
+        category=req.category,
+        platform=req.platform,
+        market=req.market,
+    )
+    return {"status": "success", "video_package": result}
+
 @router.get("/demo-presets")
 async def get_demo_presets():
     """获取预设演示商品案例"""
@@ -92,7 +114,7 @@ async def get_demo_presets():
                 "category": "男士衬衫",
                 "default_platform": "Shopee",
                 "default_market": "Southeast Asia",
-                "image_url": "https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=600&auto=format&fit=crop&q=80",
+                "image_url": "https://img.alicdn.com/imgextra/i2/6000000005645/O1CN01JHgOqE1c5MKHI3RlN_!!6000000005645-0-tps-800-800.jpg",
                 "prompt": "为这款极简透气亚麻休闲长袖衬衫生成 Shopee 东南亚站点的选品分析与双语 Listing。"
             }
         ]

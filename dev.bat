@@ -29,14 +29,14 @@ if "%MODE%"=="" set MODE=both
 
 if "%MODE%"=="backend" (
     echo [开发] 仅启动后端 FastAPI...
-    start "Backend Dev" cmd /k "cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+    start "Backend Dev" cmd /k "cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8002 --reload"
 ) else if "%MODE%"=="frontend" (
     echo [开发] 仅启动前端 Vite...
     start "Frontend Dev" cmd /k "cd /d \"%BASE_DIR%frontend\" & npm run dev"
 ) else if "%MODE%"=="both" (
     echo [开发] 同时启动前后端...
-    echo [启动] 后端 FastAPI (http://127.0.0.1:8000)...
-    start "Backend Dev" cmd /k "cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+    echo [启动] 后端 FastAPI (http://127.0.0.1:8002)...
+    start "Backend Dev" cmd /k "cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8002 --reload"
 
     timeout /t 3 >nul
 

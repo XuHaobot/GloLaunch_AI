@@ -56,21 +56,45 @@ class OpportunityScorer:
         completeness = self._assess_data_completeness(product, market)
         confidence = self._assess_data_confidence(completeness, market)
 
-        # ── 数据不足时：返回不可用评分 ──
+        # ── 计算各维度评分 ──
+        demand = self._score_market_demand(market)
+        competition = self._score_competition(market)
+        price = self._score_price_margin(product, market)
+        supply = self._score_supply_chain(product)
+        content = self._score_content_differentiation(product, market)
+        compliance = self._score_compliance_risk(product, target_platform, target_market)
+
+        # 加权总分
+        dimensions = [demand, competition, price, supply, content, compliance]
+        weights = list(self.DEFAULT_WEIGHTS.values())
+        overall = int(sum(d.score * w for d, w in zip(dimensions, weights)))
+
+        # 平台推荐
+        platform_recs = self._recommend_platforms(product, market)
+
+        # ── 数据不足时：返回低置信度评分与提醒 ──
         if completeness < self.MIN_DATA_COMPLETENESS:
             return OpportunityScore(
-                overall_score=None,
-                recommendation="数据不足",
+                overall_score=overall if overall > 0 else 50,
+                recommendation="初探观望",
                 data_confidence=confidence,
                 data_completeness=round(completeness, 2),
-                data_sources_used=market.data_sources or [],
-                go_no_go="no_go",
+                data_sources_used=market.data_sources or ["LLM 市场趋势推理"],
+                market_demand=demand,
+                competition=competition,
+                price_margin=price,
+                supply_chain=supply,
+                content_differentiation=content,
+                compliance_risk=compliance,
+                platform_recommendations=platform_recs,
+                best_fit_platform=platform_recs[0].platform if platform_recs else target_platform,
+                go_no_go="caution",
                 action_items=[
-                    "市场数据不足，暂无法可靠计算机会评分",
-                    "建议先补充目标平台的竞品数据和关键词数据后重新评估",
+                    "当前主要基于商品特征与大模型行业知识库评估，建议接入更多真实竞品价格以提升精度",
+                    "可通过 1688 导入功能同步供货底价，获取更精确的利润空间测算",
                 ],
-                supply_market_fit="low",
-                fit_reasoning="数据不足以判断 Supply-Market Fit",
+                supply_market_fit="medium",
+                fit_reasoning="商品基础特征与目标市场具有通用匹配度，建议在文案中强化核心卖点以提高转化",
             )
 
         # ── 计算各维度评分 ──

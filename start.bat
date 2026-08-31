@@ -77,11 +77,11 @@ echo.
 
 :: ========== 2. 清理旧进程 ==========
 echo [清理] 检查端口占用...
-netstat -aon 2>nul | findstr ":8000.*LISTENING" >nul
+netstat -aon 2>nul | findstr ":8002.*LISTENING" >nul
 if not errorlevel 1 (
-    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8000.*LISTENING"') do (
+    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8002.*LISTENING"') do (
         taskkill /PID %%a /F >nul 2>&1
-        echo [释放] 已关闭端口 8000 的旧进程 (PID %%a)
+        echo [释放] 已关闭端口 8002 的旧进程 (PID %%a)
     )
 )
 netstat -aon 2>nul | findstr ":5173.*LISTENING" >nul
@@ -95,8 +95,8 @@ timeout /t 1 >nul
 
 :: ========== 3. 启动后端 ==========
 echo.
-echo [启动] 后端 FastAPI (http://127.0.0.1:8000)...
-start "GloLaunch Backend" cmd /k "title GloLaunch Backend & cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+echo [启动] 后端 FastAPI (http://127.0.0.1:8002)...
+start "GloLaunch Backend" cmd /k "title GloLaunch Backend & cd /d \"%BASE_DIR%backend\" & %PY% -m uvicorn app.main:app --host 127.0.0.1 --port 8002 --reload"
 
 :: 等待后端初始化
 timeout /t 3 >nul
@@ -115,8 +115,8 @@ echo   OK GloLaunch AI 启动完毕！
 echo ============================================================
 echo.
 echo   前端工作台: http://localhost:5173
-echo   后端 API   : http://127.0.0.1:8000/docs
-echo   健康检查   : http://127.0.0.1:8000/
+echo   后端 API   : http://127.0.0.1:8002/docs
+echo   健康检查   : http://127.0.0.1:8002/
 echo.
 echo   说明:
 echo     - 每个服务在独立的终端窗口中运行

@@ -150,7 +150,13 @@ async def chat_stream(req: LaunchRequest):
 
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # 每 5 秒发送 SSE 心跳注释，防止浏览器/代理/客户端连接超时断开
+                    yield ": ping\n\n"
+                    continue
+
                 kind = item["type"]
 
                 if kind == "node_start":

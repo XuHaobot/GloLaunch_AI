@@ -25,6 +25,7 @@
   --gl-amber: #f59e0b;
   --gl-red: #ef4444;
   --gl-blue: #2563eb;
+  --gl-formula-text: #1e293b;
 }
 
 html.dark {
@@ -46,6 +47,7 @@ html.dark {
   --gl-hover: #16203a;
   --gl-active: #1d2b4d;
   --gl-shadow: rgba(0, 0, 0, 0.3);
+  --gl-formula-text: #fde68a;
 }
 
 /* 细滚动条（面板内部滚动区） */
