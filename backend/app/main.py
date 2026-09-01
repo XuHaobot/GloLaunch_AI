@@ -42,14 +42,22 @@ app.include_router(v2.router)
 if os.path.exists(settings.upload_dir):
     app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
-@app.get("/")
-async def root():
-    return {
-        "app": "GloLaunch AI",
-        "version": "3.0.0",
-        "engine": "LangGraph StateGraph + Qwen3.8-Max / Qwen3.7-Plus",
-        "status": "healthy"
-    }
+# 托管前端 SPA 构建产物（若存在）
+_FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+if not os.path.exists(_FRONTEND_DIST):
+    _FRONTEND_DIST = "/app/frontend/dist"
+
+if os.path.exists(_FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
+else:
+    @app.get("/")
+    async def root():
+        return {
+            "app": "GloLaunch AI",
+            "version": "3.0.0",
+            "engine": "LangGraph StateGraph + Qwen3.8-Max / Qwen3.7-Plus",
+            "status": "healthy"
+        }
 
 if __name__ == "__main__":
     import uvicorn

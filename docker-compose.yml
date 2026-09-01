@@ -1,0 +1,16 @@
+services:
+  glolaunch-ai:
+    build: .
+    container_name: glolaunch-ai
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    volumes:
+      - glolaunch_data:/app/backend/data
+      - glolaunch_uploads:/app/backend/uploads
+    restart: unless-stopped
+
+volumes:
+  glolaunch_data:
+  glolaunch_uploads:

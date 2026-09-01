@@ -1,0 +1,17 @@
+.git
+.gitignore
+.workbuddy
+node_modules
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+*.log
+frontend/dist
+frontend/node_modules
+backend/data
+backend/uploads
+*.png
+*.jpg
+*.bat
