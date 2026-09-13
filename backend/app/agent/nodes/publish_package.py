@@ -15,6 +15,7 @@ from typing import Dict, Any
 import httpx
 
 from app.agent.state import AgentState
+from app.config import get_settings
 from app.domain.enums import ComplianceStatus, PublishDecision
 from app.domain.publish import PublishPackage, PublishCheckItem
 from app.domain.listing import ListingHealth

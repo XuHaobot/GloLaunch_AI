@@ -7,11 +7,17 @@
         <span class="intent-tag" v-if="intentLabel">{{ intentLabel }}</span>
       </div>
       <div class="header-right">
-        <span class="eta-text" v-if="isRunning && etaSeconds > 0">
+        <span class="eta-text" v-if="isRunning">
           <el-icon class="is-loading"><Loading /></el-icon>
-          预计还需约 {{ etaSeconds }} 秒
+          <template v-if="props.plannedNodes && props.plannedNodes.length > 0">
+            已完成 {{ completedNodesCount }} / {{ props.plannedNodes.length }} 步
+          </template>
+          <template v-else>
+            正在初始化工作流
+          </template>
+          <template v-if="runningNodeTitle"> · 进行中：{{ runningNodeTitle }}</template>
         </span>
-        <span class="eta-text done" v-else-if="allCompleted">全部完成</span>
+        <span class="eta-text done" v-else-if="allCompleted">全部完成 · {{ activeNodes.length }} / {{ activeNodes.length }} 步</span>
         <el-tag :type="statusTagType" size="small" effect="dark">
           {{ graphStatusText }}
         </el-tag>
@@ -102,7 +108,8 @@ const props = defineProps({
   traceLogs: { type: Array, default: () => [] },
   isRunning: { type: Boolean, default: false },
   etaSeconds: { type: Number, default: 0 },
-  nodeDurations: { type: Object, default: () => ({}) }
+  nodeDurations: { type: Object, default: () => ({}) },
+  lastError: { type: String, default: '' }
 })
 
 // 后端未推送 plan 时的默认全链路泳道（兜底展示）
@@ -149,8 +156,23 @@ const progressPercent = computed(() => {
 })
 
 const allCompleted = computed(() =>
-  activeNodes.value.length > 0 && props.completedNodes.length >= activeNodes.value.length
+  !props.lastError &&
+  props.plannedNodes.length > 0 &&
+  completedNodesCount.value >= props.plannedNodes.length
 )
+
+const completedNodesCount = computed(() => {
+  const ids = (props.completedNodes || [])
+    .map(n => (typeof n === 'object' && n ? (n.id || n.name) : n))
+    .filter(Boolean)
+  return new Set(ids).size
+})
+
+const runningNodeTitle = computed(() => {
+  if (!props.runningNode) return ''
+  const found = activeNodes.value.find(n => (n.id || n) === props.runningNode)
+  return found?.name || props.runningNode
+})
 
 function nodesByStage(stageId) {
   return activeNodes.value.filter(n => n.stage === stageId)
@@ -177,12 +199,14 @@ function durationText(nodeId) {
 }
 
 const graphStatusText = computed(() => {
+  if (props.lastError) return '执行中断'
   if (props.isRunning) return 'Agent 编排执行中'
-  if (allCompleted.value) return '全链路执行完毕'
+  if (allCompleted.value) return '全部完成'
   return '就绪'
 })
 
 const statusTagType = computed(() => {
+  if (props.lastError) return 'danger'
   if (props.isRunning) return 'warning'
   if (allCompleted.value) return 'success'
   return 'info'

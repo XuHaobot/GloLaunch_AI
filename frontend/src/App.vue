@@ -15,16 +15,61 @@
         </div>
       </div>
       <div class="nav-actions">
-        <!-- 执行进度指示 -->
-        <div class="eta-indicator" v-if="isRunning">
-          <el-icon class="is-loading" color="#38bdf8"><Loading /></el-icon>
-          <span class="eta-text">
-            执行中 · 预计还需约 <strong>{{ etaSeconds }}</strong> 秒
-          </span>
+        <!-- 执行进度指示：严格按照 error > running > done > idle 优先级展示 -->
+
+        <!-- 1. 异常 / 中断状态 (error) -->
+        <div class="eta-indicator error" v-if="workflowStatus === 'error'">
+          <el-icon color="#f43f5e"><CircleCloseFilled /></el-icon>
+          <div class="eta-content">
+            <div class="eta-main">
+              <template v-if="totalNodesCount > 0">
+                执行中断 · 已完成 <strong>{{ completedNodesCount }}</strong> / {{ totalNodesCount }} 个步骤
+              </template>
+              <template v-else>
+                执行中断 · 已完成 <strong>{{ completedNodesCount }}</strong> 个步骤
+              </template>
+            </div>
+            <div class="eta-sub error-text" :title="lastError">
+              {{ errorSummaryText }}
+            </div>
+          </div>
         </div>
-        <div class="eta-indicator done" v-else-if="completedNodes.length > 0">
+
+        <!-- 2. 执行中状态 (running) -->
+        <div class="eta-indicator running" v-else-if="workflowStatus === 'running'">
+          <el-icon class="is-loading" color="#38bdf8"><Loading /></el-icon>
+          <div class="eta-content">
+            <div class="eta-main">
+              <template v-if="totalNodesCount > 0">
+                执行中 · 已完成 <strong>{{ completedNodesCount }}</strong> / {{ totalNodesCount }} 个步骤
+              </template>
+              <template v-else>
+                执行中 · 正在初始化工作流
+              </template>
+            </div>
+            <div class="eta-sub" v-if="currentRunningNodeName">
+              正在进行：<span>{{ currentRunningNodeName }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. 全部完成状态 (done)：必须所有规划节点均已完成且无 error -->
+        <div class="eta-indicator done" v-else-if="workflowStatus === 'done'">
           <el-icon color="#22c55e"><CircleCheckFilled /></el-icon>
-          <span class="eta-text">全链路执行完毕</span>
+          <div class="eta-content">
+            <div class="eta-main">
+              全部完成 · <strong>{{ completedNodesCount }}</strong> / {{ totalNodesCount }} 个步骤
+            </div>
+            <div class="eta-sub done-text">全链路各环节成果已生成</div>
+          </div>
+        </div>
+
+        <!-- 4. 未开始 / 就绪状态 (idle) -->
+        <div class="eta-indicator idle" v-else>
+          <el-icon color="#94a3b8"><Clock /></el-icon>
+          <div class="eta-content">
+            <div class="eta-main">等待执行</div>
+          </div>
         </div>
         <el-tag type="success" effect="plain" class="token-plan-tag">
           <el-icon><Check /></el-icon> 专属 Token Plan 连接正常
@@ -976,6 +1021,81 @@ const activeTab = ref('listing') // 保留兼容，但不再用于主导航
 const lastThreadId = ref(null)
 const lastError = ref('')
 
+// 节点标识到标准中文名称映射
+const NODE_NAME_MAP = {
+  extract_attributes: '商品智能解析',
+  analyze_market: '出海市场洞察',
+  opportunity_score: '上架机会评分',
+  asset_inventory: '素材盘点与缺口分析',
+  trend_benchmark: '爆款对标研究',
+  generate_listing: '爆款化 Listing 撰写',
+  studio_generation: 'AI 商品摄影',
+  video_production: '带货视频生产',
+  image_localization: '图片文字本地化',
+  adapt_platform: '平台合规质检',
+  publish_package: '发布包组装审核',
+  respond: '成果汇总打包',
+}
+
+// 实际工作流总步骤数（仅当 plan 事件到达后返回真实 plannedNodes 数量，未到达时为 0，彻底移除硬编码）
+const totalNodesCount = computed(() => {
+  if (plannedNodes.value && plannedNodes.value.length > 0) {
+    return plannedNodes.value.length
+  }
+  return 0
+})
+
+// 实际已完成的步骤数量（按节点标识去重，避免断点续跑、重复 node_update 重复计数）
+const completedNodesCount = computed(() => {
+  const ids = (completedNodes.value || [])
+    .map(n => (typeof n === 'object' && n ? (n.id || n.name) : n))
+    .filter(Boolean)
+  return new Set(ids).size
+})
+
+// 当前正在运行的节点中文名
+const currentRunningNodeName = computed(() => {
+  if (!runningNode.value) return ''
+  if (plannedNodes.value && plannedNodes.value.length > 0) {
+    const found = plannedNodes.value.find(n => (n.id || n) === runningNode.value)
+    if (found && found.name) return found.name
+  }
+  return NODE_NAME_MAP[runningNode.value] || runningNode.value
+})
+
+// 工作流综合状态计算，严格保证优先级：error > running > done > idle
+const workflowStatus = computed(() => {
+  // 1. 存在未恢复的异常或错误信息
+  if (lastError.value) {
+    return 'error'
+  }
+  // 2. 正在执行中
+  if (isRunning.value) {
+    return 'running'
+  }
+  // 3. 全部完成：必须有规划节点、所有节点实际完成且无 error
+  if (
+    totalNodesCount.value > 0 &&
+    completedNodesCount.value >= totalNodesCount.value
+  ) {
+    return 'done'
+  }
+  // 4. 若有已完成节点但未达到总数且未在运行，视为执行中断
+  if (completedNodesCount.value > 0) {
+    return 'error'
+  }
+  // 5. 初始未开始
+  return 'idle'
+})
+
+// 错误摘要提示文本（用于顶部副标题展示）
+const errorSummaryText = computed(() => {
+  if (!lastError.value) return '可在下方断点续跑'
+  const text = String(lastError.value).trim()
+  const shortText = text.length > 35 ? text.slice(0, 32) + '...' : text
+  return `上次执行异常：${shortText}`
+})
+
 // 1688 导入相关状态
 const importDialogVisible = ref(false)
 const importUrl = ref('')
@@ -1143,8 +1263,8 @@ function resetAll() {
 
 async function runPipeline({ resume = false } = {}) {
   isRunning.value = true
+  lastError.value = '' // 启动运行（包括断点续跑）前清空上一轮错误
   if (!resume) {
-    lastError.value = ''
     ElMessage.info('AI 引擎启动，正在编排执行流水线...')
   } else {
     ElMessage.info('从检查点断点继续执行...')
@@ -1174,6 +1294,11 @@ async function runPipeline({ resume = false } = {}) {
       body: JSON.stringify(body)
     })
 
+    if (!response.ok) {
+      const errText = await response.text()
+      throw new Error(`服务响应异常 (HTTP ${response.status}): ${errText || response.statusText}`)
+    }
+
     const reader = response.body.getReader()
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
@@ -1201,6 +1326,11 @@ async function runPipeline({ resume = false } = {}) {
           }
         }
       }
+    }
+
+    // 流结束核验：若未达到全部规划步骤且无明确错误，标记为中断
+    if (!lastError.value && totalNodesCount.value > 0 && completedNodesCount.value < totalNodesCount.value) {
+      lastError.value = '工作流未全部完成即异常终止（可从断点继续执行）'
     }
   } catch (error) {
     console.error('执行失败:', error)
@@ -1840,31 +1970,74 @@ body {
 .eta-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 4px 12px;
   border-radius: 6px;
-  background: rgba(56, 189, 248, 0.1);
+  background: rgba(56, 189, 248, 0.08);
   border: 1px solid rgba(56, 189, 248, 0.25);
   flex-shrink: 0;
+}
+.eta-indicator.running {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.35);
 }
 .eta-indicator.done {
   background: rgba(34, 197, 94, 0.1);
   border-color: rgba(34, 197, 94, 0.3);
 }
-.eta-text {
+.eta-indicator.error {
+  background: rgba(244, 63, 94, 0.1);
+  border-color: rgba(244, 63, 94, 0.3);
+}
+.eta-indicator.idle {
+  background: rgba(148, 163, 184, 0.06);
+  border-color: rgba(148, 163, 184, 0.2);
+}
+.eta-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.25;
+}
+.eta-main {
   font-size: 12px;
-  color: var(--gl-text-mid);
+  font-weight: 500;
+  color: var(--gl-text-primary, #e2e8f0);
   white-space: nowrap;
 }
-.eta-text strong {
+.eta-main strong {
   color: #38bdf8;
   font-variant-numeric: tabular-nums;
 }
-.eta-indicator.done .eta-text {
+.eta-sub {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+.eta-sub span {
+  color: #38bdf8;
+  font-weight: 500;
+}
+.eta-sub.done-text {
   color: #22c55e;
 }
-.eta-indicator.done .eta-text strong {
+.eta-sub.error-text {
+  color: #f43f5e;
+}
+.eta-indicator.done .eta-main {
   color: #22c55e;
+}
+.eta-indicator.done .eta-main strong {
+  color: #22c55e;
+}
+.eta-indicator.error .eta-main {
+  color: #f43f5e;
+}
+.eta-indicator.error .eta-main strong {
+  color: #f43f5e;
+}
+.eta-indicator.idle .eta-main {
+  color: var(--gl-text-muted, #94a3b8);
 }
 
 .main-content {
