@@ -227,7 +227,20 @@ async def _download_and_save(url: str) -> Optional[str]:
 # ── 下载远程图片到 bytes ──
 
 async def _download_image_bytes(url: str) -> Optional[bytes]:
-    """下载远程图片，返回 bytes"""
+    """下载远程图片或读取本地 /uploads/ 图片，返回 bytes"""
+    if not url:
+        return None
+    if url.startswith("/uploads/"):
+        settings = get_settings()
+        filename = os.path.basename(url)
+        cand = os.path.join(settings.upload_dir, filename)
+        if os.path.isfile(cand):
+            try:
+                with open(cand, "rb") as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"读取本地图片失败: {cand} -> {e}")
+                return None
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url)

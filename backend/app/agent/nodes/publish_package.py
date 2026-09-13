@@ -122,9 +122,24 @@ def _download_images_into_zip(zf: zipfile.ZipFile, urls: list[str]) -> None:
 
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         for url in urls:
-            if url in seen:
+            if not url or url in seen:
                 continue
             seen.add(url)
+            if url.startswith("/uploads/"):
+                settings = get_settings()
+                filename = os.path.basename(url)
+                cand = os.path.join(settings.upload_dir, filename)
+                if os.path.isfile(cand):
+                    try:
+                        with open(cand, "rb") as f:
+                            data = f.read()
+                        idx += 1
+                        ext = os.path.splitext(cand)[1] or ".jpg"
+                        arcname = f"images/image_{idx:03d}{ext}"
+                        zf.writestr(arcname, data)
+                    except Exception as exc:
+                        logger.debug("Skipping local image %s: %s", url, exc)
+                continue
             try:
                 resp = client.get(url)
                 resp.raise_for_status()

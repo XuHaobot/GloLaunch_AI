@@ -9,13 +9,15 @@
    优先从页面内嵌的全局数据对象（如 window.__INIT_DATA / detailData）中抽取结构化字段，
    失败时返回明确提示，引导用户手动填写。
 """
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,6 +25,8 @@ from pydantic import BaseModel
 import httpx
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/import", tags=["商品导入"])
 
@@ -33,6 +37,14 @@ BROWSER_HEADERS = {
     ),
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Referer": "https://www.1688.com/",
+}
+
+MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
 }
 
 class ImportRequest(BaseModel):
@@ -50,10 +62,167 @@ def _sign_params(app_secret: str, path_segment: str, params: Dict[str, str]) -> 
     return digest.hex().upper()
 
 def _normalize_image_url(img: str) -> str:
-    """官方 API 返回的图片可能无协议前缀，统一补全"""
-    if img.startswith("http"):
+    """统一补全图片 URL 协议前缀与清洗"""
+    if not img:
+        return ""
+    img = str(img).strip()
+    if img.startswith("http://") or img.startswith("https://"):
         return img
+    if img.startswith("//"):
+        return f"https:{img}"
     return f"https://cbu01.alicdn.com/{img.lstrip('/')}"
+
+def _url_to_hash_key(url: str) -> str:
+    """基于规范化 URL 生成稳定的 16 进制 hash key"""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+async def _download_and_cache_image(client: httpx.AsyncClient, img_url: str, upload_dir: str) -> str:
+    """下载 1688 远程图片并保存到 uploads 目录，返回 /uploads/{filename}。
+    - 校验 HTTP 状态码 200
+    - 校验 Content-Type（或文件魔数）是否为合法图片格式
+    - 避免重复下载：若同 hash 文件已存在且大小大于 0，直接复用
+    - 超时 15 秒、重定向跟踪、异常保护
+    - 下载失败时允许 fallback，返回原始 img_url，不导致流程中断
+    """
+    if not img_url or not isinstance(img_url, str):
+        return img_url
+
+    clean_url = img_url.strip()
+    if not clean_url:
+        return img_url
+
+    # 若已是本地 uploads 路径或 data URI，直接返回
+    if clean_url.startswith("/uploads/") or clean_url.startswith("data:"):
+        return clean_url
+
+    norm_url = _normalize_image_url(clean_url)
+    if not norm_url.startswith(("http://", "https://")):
+        return clean_url
+
+    url_hash = _url_to_hash_key(norm_url)
+
+    # 1. 检查本地是否已存在同 hash 文件（避免重复下载相同图片）
+    for ext in (".jpg", ".png", ".webp", ".jpeg", ".gif"):
+        cand_name = f"1688_{url_hash}{ext}"
+        cand_path = os.path.join(upload_dir, cand_name)
+        if os.path.isfile(cand_path) and os.path.getsize(cand_path) > 0:
+            return f"/uploads/{cand_name}"
+
+    # 2. 发起 HTTP 请求下载
+    try:
+        resp = await client.get(
+            norm_url,
+            headers={
+                "User-Agent": BROWSER_HEADERS["User-Agent"],
+                "Referer": "https://www.1688.com/",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+            timeout=15.0,
+            follow_redirects=True,
+        )
+
+        # 校验 HTTP 状态码
+        if resp.status_code != 200:
+            logger.warning("1688 图片下载状态码非 200: %s HTTP %d", norm_url, resp.status_code)
+            return norm_url
+
+        content = resp.content
+        if not content:
+            logger.warning("1688 图片下载内容为空: %s", norm_url)
+            return norm_url
+
+        # 校验 Content-Type 与魔数
+        raw_ct = resp.headers.get("content-type", "").lower().split(";")[0].strip()
+        ext = MIME_TO_EXT.get(raw_ct)
+        if not ext:
+            if content.startswith(b"\xff\xd8\xff"):
+                ext = ".jpg"
+            elif content.startswith(b"\x89PNG\r\n\x1a\n"):
+                ext = ".png"
+            elif content.startswith(b"RIFF") and b"WEBP" in content[:16]:
+                ext = ".webp"
+            elif content.startswith((b"GIF87a", b"GIF89a")):
+                ext = ".gif"
+            elif raw_ct.startswith("image/"):
+                ext = ".jpg"
+            else:
+                logger.warning("1688 图片非合法图片格式: %s (Content-Type: %s)", norm_url, raw_ct)
+                return norm_url
+
+        # 保存到本地 uploads 目录
+        filename = f"1688_{url_hash}{ext}"
+        filepath = os.path.join(upload_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        return f"/uploads/{filename}"
+
+    except Exception as exc:
+        logger.warning("1688 图片下载异常: %s -> %s", norm_url, exc)
+        return norm_url
+
+async def _localize_product_images_dict(product_data: Dict[str, Any]) -> Dict[str, Any]:
+    """并发下载 1688 商品主图和素材图片，持久化到 uploads 目录，更新 product 字典。
+    - product['main_image'] 优先使用 /uploads/... 本地地址
+    - product['images'] 优先使用 [/uploads/..., ...]
+    - product['assets'] 别名同步为 [/uploads/..., ...]
+    - product['original_main_image'] 保留原始 Alibaba CDN 主图地址
+    - product['original_images'] 保留原始 Alibaba CDN 素材图片列表
+    - product['original_assets'] 别名同步原始素材列表
+    """
+    if not product_data or not isinstance(product_data, dict):
+        return product_data
+
+    settings = get_settings()
+    upload_dir = settings.upload_dir
+    os.makedirs(upload_dir, exist_ok=True)
+
+    orig_main = product_data.get("main_image")
+    orig_images = list(product_data.get("images") or [])
+
+    # 保留原始 URL 字段作为 source/original URL
+    product_data["original_main_image"] = orig_main
+    product_data["original_images"] = list(orig_images)
+    product_data["original_assets"] = list(orig_images)
+
+    # 收集待下载的所有不重复 URL
+    all_urls: List[str] = []
+    if orig_main:
+        all_urls.append(orig_main)
+    for u in orig_images:
+        if u and u not in all_urls:
+            all_urls.append(u)
+
+    if not all_urls:
+        product_data["assets"] = list(orig_images)
+        return product_data
+
+    # 并发下载 (控制并发度为 6)
+    semaphore = asyncio.Semaphore(6)
+
+    async def _safe_download(client: httpx.AsyncClient, u: str) -> Tuple[str, str]:
+        async with semaphore:
+            loc = await _download_and_cache_image(client, u, upload_dir)
+            return u, loc
+
+    url_map: Dict[str, str] = {}
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+            tasks = [_safe_download(client, u) for u in all_urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, tuple) and len(r) == 2:
+                    url_map[r[0]] = r[1]
+    except Exception as exc:
+        logger.warning("并发下载 1688 图片整体异常: %s", exc)
+
+    # 替换为本地 /uploads/... 地址（若下载失败 fallback 为原始 URL）
+    if orig_main:
+        product_data["main_image"] = url_map.get(orig_main, orig_main)
+    product_data["images"] = [url_map.get(u, u) for u in orig_images]
+    product_data["assets"] = list(product_data["images"])
+
+    return product_data
 
 def _token_file_path() -> str:
     return os.path.join(get_settings().data_dir, "ali1688_token.json")
@@ -131,17 +300,20 @@ async def _import_via_open_api(url: str) -> Dict[str, Any]:
     # 限制最多 8 个属性
     sku_attributes = dict(list(sku_attributes.items())[:8])
 
+    product_data = {
+        "title": info.get("subject"),
+        "main_image": images[0] if images else None,
+        "images": images,
+        "source_price": price,
+        "sku_attributes": sku_attributes,
+        "source_url": url,
+    }
+    product_data = await _localize_product_images_dict(product_data)
+
     return {
         "success": True,
         "message": "官方 API 解析成功",
-        "product": {
-            "title": info.get("subject"),
-            "main_image": images[0] if images else None,
-            "images": images,
-            "source_price": price,
-            "sku_attributes": sku_attributes,
-            "source_url": url,
-        },
+        "product": product_data,
     }
 
 async def _import_via_justoneapi(url: str) -> Dict[str, Any]:
@@ -226,17 +398,20 @@ async def _import_via_justoneapi(url: str) -> Dict[str, Any]:
             sku_attributes[name] = vals
     sku_attributes = dict(list(sku_attributes.items())[:8])
 
+    product_data = {
+        "title": title,
+        "main_image": images[0] if images else None,
+        "images": images,
+        "source_price": price,
+        "sku_attributes": sku_attributes,
+        "source_url": url,
+    }
+    product_data = await _localize_product_images_dict(product_data)
+
     return {
         "success": True,
         "message": "JustOneAPI 解析成功",
-        "product": {
-            "title": title,
-            "main_image": images[0] if images else None,
-            "images": images,
-            "source_price": price,
-            "sku_attributes": sku_attributes,
-            "source_url": url,
-        },
+        "product": product_data,
     }
 
 def _extract_title(html: str) -> Optional[str]:
@@ -416,15 +591,18 @@ async def import_from_1688(req: ImportRequest):
         errors.append(f"官方 API: {api_error}")
     if errors:
         message += f"；⚠️ 降级至页面抓取（{'；'.join(errors)}）"
+    product_data = {
+        "title": title,
+        "main_image": images[0] if images else None,
+        "images": images,
+        "source_price": extra.get("price"),
+        "sku_attributes": extra.get("sku_attributes", {}),
+        "source_url": url,
+    }
+    product_data = await _localize_product_images_dict(product_data)
+
     return {
         "success": True,
         "message": message,
-        "product": {
-            "title": title,
-            "main_image": images[0] if images else None,
-            "images": images,
-            "source_price": extra.get("price"),
-            "sku_attributes": extra.get("sku_attributes", {}),
-            "source_url": url,
-        },
+        "product": product_data,
     }
